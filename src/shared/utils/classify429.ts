@@ -53,6 +53,11 @@ const QUOTA_PATTERNS: ReadonlyArray<RegExp> = [
   /individual quota reached/i,
   /enable overages/i,
   /INSUFFICIENT_G1_CREDITS_BALANCE/i,
+
+  // Google APIs return this generic RESOURCE_EXHAUSTED message when a
+  // billing-period quota has been consumed. Keep the reset-window qualifier
+  // so transient Google rate limits are not treated as long-term exhaustion.
+  /resource has been exhausted.*reset after/i,
 ];
 
 /**
