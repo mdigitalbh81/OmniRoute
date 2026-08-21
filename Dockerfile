@@ -224,3 +224,32 @@ RUN --mount=type=cache,id=npm-cache,target=/root/.npm \
   npm install -g --no-audit --no-fund @openai/codex @anthropic-ai/claude-code droid openclaw@latest
 
 USER node
+
+# ── Vision custom runtime ──────────────────────────────────────────────────
+# OmniRoute v3.8.48 + Antigravity 429 fix + development CLIs
+FROM runner-base AS runner-custom
+
+USER root
+
+RUN apt-get update && apt-get install -y \
+    bash \
+    curl \
+    ca-certificates \
+    git \
+    ripgrep \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV HOME=/root
+ENV SHELL=/bin/bash
+ENV npm_config_ignore_scripts=false
+ENV npm_config_omit=
+
+RUN npm install -g --include=optional --foreground-scripts \
+    @anthropic-ai/claude-code \
+    @openai/codex
+
+RUN node "$(npm root -g)/@anthropic-ai/claude-code/install.cjs"
+
+RUN claude --version
+RUN codex --version
