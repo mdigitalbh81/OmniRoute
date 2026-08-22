@@ -6,6 +6,7 @@ on:
       - fix/antigravity-429-fast-fallback
     paths:
       - "src/shared/utils/classify429.ts"
+      - "open-sse/translator/response/gemini-to-openai.ts"
       - "Dockerfile"
       - ".github/workflows/publish-ghcr-fix.yml"
 
@@ -15,7 +16,7 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/mdigitalbh81/omniroute
-  IMAGE_TAG: 3.8.48-fix-429
+  IMAGE_TAG: 3.8.48-fix-429-usage
 
 jobs:
   build:
@@ -45,6 +46,6 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ghcr.io/mdigitalbh81/omniroute:3.8.48-fix-429
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

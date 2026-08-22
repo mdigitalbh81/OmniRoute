@@ -298,6 +298,52 @@ export function geminiToOpenAIResponse(chunk, state) {
   const response = chunk.response || chunk;
   if (!response) return null;
 
+  // Antigravity/Gemini may send token usage in a final SSE chunk that has
+  // usageMetadata but no candidates. Capture it before the candidate guard
+  // so it is not discarded.
+  const usageMeta = response.usageMetadata || chunk.usageMetadata;
+  const hasUsageMetadata = usageMeta && typeof usageMeta === "object";
+
+  if (hasUsageMetadata) {
+    const cachedTokens =
+      typeof usageMeta.cachedContentTokenCount === "number" ? usageMeta.cachedContentTokenCount : 0;
+    const promptTokenCountRaw =
+      typeof usageMeta.promptTokenCount === "number" ? usageMeta.promptTokenCount : 0;
+    const thoughtsTokens =
+      typeof usageMeta.thoughtsTokenCount === "number" ? usageMeta.thoughtsTokenCount : 0;
+    let candidatesTokens =
+      typeof usageMeta.candidatesTokenCount === "number" ? usageMeta.candidatesTokenCount : 0;
+    const totalTokens =
+      typeof usageMeta.totalTokenCount === "number" ? usageMeta.totalTokenCount : 0;
+
+    const promptTokens = promptTokenCountRaw;
+
+    if (candidatesTokens === 0 && totalTokens > 0) {
+      candidatesTokens = totalTokens - promptTokenCountRaw - thoughtsTokens;
+      if (candidatesTokens < 0) candidatesTokens = 0;
+    }
+
+    const completionTokens = candidatesTokens + thoughtsTokens;
+
+    state.usage = {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: totalTokens,
+    };
+
+    if (cachedTokens > 0) {
+      state.usage.prompt_tokens_details = {
+        cached_tokens: cachedTokens,
+      };
+    }
+
+    if (thoughtsTokens > 0) {
+      state.usage.completion_tokens_details = {
+        reasoning_tokens: thoughtsTokens,
+      };
+    }
+  }
+
   const modelVersion =
     typeof response.modelVersion === "string" ? response.modelVersion.toLowerCase() : "";
   const parseTextualReasoningTags = !chunk.response && !modelVersion.startsWith("antigravity/");
@@ -340,7 +386,25 @@ export function geminiToOpenAIResponse(chunk, state) {
     }
 
     const promptFeedback = response.promptFeedback || chunk.promptFeedback;
-    if (!promptFeedback) return null;
+    if (!promptFeedback) {
+      // A trailing usage-only Gemini/Antigravity SSE chunk must continue
+      // through the translator. The Responses API translator consumes
+      // choices: [] + usage and attaches the token counts to
+      // response.completed.
+      if (hasUsageMetadata && state.usage) {
+        return [
+          {
+            id: `chatcmpl-${state.messageId || response.responseId || Date.now()}`,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: state.model || response.modelVersion || "gemini",
+            choices: [],
+            usage: state.usage,
+          },
+        ];
+      }
+      return null;
+    }
 
     if (!state.messageId) {
       state.messageId = response.responseId || `msg_${Date.now()}`;
@@ -637,53 +701,6 @@ export function geminiToOpenAIResponse(chunk, state) {
         ],
       });
       state.groundingProcessed = true;
-    }
-  }
-
-  // Usage metadata - extract before finish reason so we can include it
-  const usageMeta = response.usageMetadata || chunk.usageMetadata;
-  if (usageMeta && typeof usageMeta === "object") {
-    const cachedTokens =
-      typeof usageMeta.cachedContentTokenCount === "number" ? usageMeta.cachedContentTokenCount : 0;
-    const promptTokenCountRaw =
-      typeof usageMeta.promptTokenCount === "number" ? usageMeta.promptTokenCount : 0;
-    const thoughtsTokens =
-      typeof usageMeta.thoughtsTokenCount === "number" ? usageMeta.thoughtsTokenCount : 0;
-    let candidatesTokens =
-      typeof usageMeta.candidatesTokenCount === "number" ? usageMeta.candidatesTokenCount : 0;
-    const totalTokens =
-      typeof usageMeta.totalTokenCount === "number" ? usageMeta.totalTokenCount : 0;
-
-    // prompt_tokens = promptTokenCount (includes cached tokens, matching claude-to-openai.js behavior)
-    const promptTokens = promptTokenCountRaw;
-
-    // Fallback calculation if candidatesTokenCount is 0 but totalTokenCount exists
-    if (candidatesTokens === 0 && totalTokens > 0) {
-      candidatesTokens = totalTokens - promptTokenCountRaw - thoughtsTokens;
-      if (candidatesTokens < 0) candidatesTokens = 0;
-    }
-
-    // completion_tokens = candidatesTokenCount + thoughtsTokenCount (match Go code)
-    const completionTokens = candidatesTokens + thoughtsTokens;
-
-    state.usage = {
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      total_tokens: totalTokens,
-    };
-
-    // Add prompt_tokens_details if cached tokens exist
-    if (cachedTokens > 0) {
-      state.usage.prompt_tokens_details = {
-        cached_tokens: cachedTokens,
-      };
-    }
-
-    // Add completion_tokens_details if reasoning tokens exist
-    if (thoughtsTokens > 0) {
-      state.usage.completion_tokens_details = {
-        reasoning_tokens: thoughtsTokens,
-      };
     }
   }
 
