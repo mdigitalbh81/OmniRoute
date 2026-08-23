@@ -727,7 +727,29 @@ export function createSSEStream(options: StreamOptions = {}) {
     lastSeenResponsesSequenceNumber = value;
     return false;
   };
+  const requestRecord = asRecord(body);
   const streamStartedAt = Date.now();
+  const traceRequestId =
+    typeof (requestRecord as Record<string, unknown>)?._omnirouteCorrelationId === "string"
+      ? ((requestRecord as Record<string, unknown>)._omnirouteCorrelationId as string)
+      : null;
+  const traceStream = (event: string, data: Record<string, unknown> = {}) => {
+    if (!traceRequestId) return;
+    console.info(
+      JSON.stringify({
+        tag: "RESPONSES_TRACE",
+        event,
+        requestId: traceRequestId,
+        provider,
+        connectionId,
+        accountId: connectionId,
+        model,
+        elapsedMs: Date.now() - streamStartedAt,
+        ...data,
+      })
+    );
+  };
+  let firstResponsesEventLogged = false;
 
   let lastToolCallChunkTime: number | null = null;
   let toolFinishTime: number | null = null;
@@ -752,7 +774,6 @@ export function createSSEStream(options: StreamOptions = {}) {
   const clientPayloadCollector = createStructuredSSECollector({
     stage: "client_response",
   });
-  const requestRecord = asRecord(body);
   const requestStreamOptions = asRecord(
     requestRecord.stream_options ?? requestRecord.streamOptions
   );
@@ -1893,12 +1914,34 @@ export function createSSEStream(options: StreamOptions = {}) {
             output = passthroughEventPrefix.prefixData(output, line);
 
             if (clientPayload) {
+              if (
+                !firstResponsesEventLogged &&
+                typeof (clientPayload as Record<string, unknown>)?.type === "string" &&
+                ((clientPayload as Record<string, unknown>).type as string).startsWith("response.")
+              ) {
+                firstResponsesEventLogged = true;
+                traceStream("firstResponsesEvent", {
+                  firstResponsesEvent: (clientPayload as Record<string, unknown>).type,
+                });
+              }
+              if ((clientPayload as Record<string, unknown>)?.type === "response.completed") {
+                traceStream("responseCompleted", { responseCompleted: true });
+              }
+              if ((clientPayload as Record<string, unknown>)?.type === "response.failed") {
+                traceStream("responseFailed", { responseFailed: true });
+              }
               clientPayloadCollector.push(clientPayload);
             }
 
             reqLogger?.appendConvertedChunk?.(output);
             controller.enqueue(encoder.encode(output));
             if (failurePayload) {
+              traceStream("streamReadError", {
+                streamReadError: true,
+                status: failurePayload.status,
+                message: failurePayload.message,
+                code: failurePayload.code,
+              });
               let failureHandled = false;
               if (onFailure) {
                 try {
@@ -2108,6 +2151,22 @@ export function createSSEStream(options: StreamOptions = {}) {
 
           if (translated?.length > 0) {
             for (const item of translated) {
+              if (
+                !firstResponsesEventLogged &&
+                typeof (item as Record<string, unknown>)?.event === "string" &&
+                ((item as Record<string, unknown>).event as string).startsWith("response.")
+              ) {
+                firstResponsesEventLogged = true;
+                traceStream("firstResponsesEvent", {
+                  firstResponsesEvent: (item as Record<string, unknown>).event,
+                });
+              }
+              if ((item as Record<string, unknown>)?.event === "response.completed") {
+                traceStream("responseCompleted", { responseCompleted: true });
+              }
+              if ((item as Record<string, unknown>)?.event === "response.failed") {
+                traceStream("responseFailed", { responseFailed: true });
+              }
               emitTranslatedClientItem(controller, item);
             }
           }
@@ -2503,6 +2562,12 @@ export function createSSEStream(options: StreamOptions = {}) {
 
           if (state?.upstreamError) {
             const err = state.upstreamError;
+            traceStream("streamReadError", {
+              streamReadError: true,
+              status: err.status,
+              message: err.message,
+              code: err.code,
+            });
 
             // Flush pending translation events BEFORE erroring the stream.
             // This lets the openai-responses translator emit a proper
@@ -2580,6 +2645,22 @@ export function createSSEStream(options: StreamOptions = {}) {
 
           if (flushed?.length > 0) {
             for (const item of flushed) {
+              if (
+                !firstResponsesEventLogged &&
+                typeof (item as Record<string, unknown>)?.event === "string" &&
+                ((item as Record<string, unknown>).event as string).startsWith("response.")
+              ) {
+                firstResponsesEventLogged = true;
+                traceStream("firstResponsesEvent", {
+                  firstResponsesEvent: (item as Record<string, unknown>).event,
+                });
+              }
+              if ((item as Record<string, unknown>)?.event === "response.completed") {
+                traceStream("responseCompleted", { responseCompleted: true });
+              }
+              if ((item as Record<string, unknown>)?.event === "response.failed") {
+                traceStream("responseFailed", { responseFailed: true });
+              }
               emitTranslatedClientItem(controller, item);
             }
           }
@@ -2717,11 +2798,16 @@ export function createSSEStream(options: StreamOptions = {}) {
             clearPendingRequestFromStream();
           }
         } catch (error) {
+          traceStream("streamReadError", {
+            streamReadError: true,
+            message: error instanceof Error ? error.message : String(error),
+          });
           console.log(`[STREAM] Error in flush (${model || "unknown"}):`, error.message || error);
         }
       },
       cancel(reason) {
         clearIdleTimer();
+        traceStream("streamClosed", { streamClosed: true, reason: String(reason ?? "") });
       },
     },
     { highWaterMark: 16384 },

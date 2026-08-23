@@ -222,6 +222,13 @@ export async function handleChat(
   // Pipeline: Start request telemetry
   const reqId = correlationId || generateRequestId();
   const telemetry = new RequestTelemetry(reqId);
+  const traceStartedAt = Date.now();
+  const traceLog = (event: string, data: Record<string, unknown> = {}) =>
+    log.info("RESPONSES_TRACE", event, {
+      requestId: reqId,
+      elapsedMs: Date.now() - traceStartedAt,
+      ...data,
+    });
 
   const backpressure = checkConnectionCapacity();
   if (backpressure.shouldReject) {
@@ -858,6 +865,7 @@ export async function handleChat(
       relayOptions,
       signal: request?.signal ?? null,
       correlationId: reqId,
+      traceLog,
     });
 
     // ── Global Fallback Provider (#689) ────────────────────────────────────
@@ -1756,6 +1764,16 @@ async function handleSingleModelChat(
           lastCooldownMs = cooldownMs;
           requestRetryLastCooldownMs = cooldownMs;
         }
+        traceLog("accountFallback", {
+          accountFallback: true,
+          provider,
+          connectionId: credentials.connectionId,
+          accountId: credentials.connectionId,
+          status: result.status,
+          error: result.error,
+          combo: comboName,
+          sessionKey: runtimeOptions.sessionAffinityKey ?? runtimeOptions.sessionId ?? null,
+        });
         log.warn("AUTH", `Account ${accountId}... unavailable (${result.status}), trying fallback`);
         // #6219: evict the sticky session pin when the pinned account fails over,
         // otherwise the next request re-pins the same throttled account until

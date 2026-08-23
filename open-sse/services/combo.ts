@@ -695,7 +695,17 @@ export async function handleComboChat({
   signal,
   apiKeyAllowedConnections = null,
   nesting = null,
+  correlationId = null,
+  traceLog,
 }: HandleComboChatOptions): Promise<Response> {
+  const traceStartedAt = Date.now();
+  const trace = (event: string, data: Record<string, unknown> = {}) =>
+    traceLog?.(event, {
+      requestId: correlationId,
+      elapsedMs: Date.now() - traceStartedAt,
+      combo: combo.name,
+      ...data,
+    });
   const comboCtx = createComboContext({ body, combo, settings, relayOptions, log });
   const {
     strategy,
@@ -1293,6 +1303,7 @@ export async function handleComboChat({
   const _registeredExecutionKeys = orderedTargets.map((t) => t.executionKey).filter(Boolean);
 
   let globalAttempts = 0;
+  const targetCount = orderedTargets.length;
 
   // Quota-share cooldown-aware retry (Variante A). Only quota-share (qtSd/)
   // combos opt in: when the set loop would crystallize a 429 model_cooldown
@@ -1576,6 +1587,16 @@ export async function handleComboChat({
             "COMBO",
             `Trying model ${i + 1}/${orderedTargets.length}: ${modelStr}${retry > 0 ? ` (retry ${retry})` : ""}`
           );
+          trace("targetStarted", {
+            targetStarted: true,
+            targetIndex: i,
+            targetCount,
+            provider,
+            connectionId: target.connectionId ?? null,
+            accountId: target.connectionId ?? null,
+            model: modelStr,
+            retry,
+          });
           emit("combo.target.attempt", {
             comboName: combo.name,
             targetIndex: i,
@@ -2227,6 +2248,17 @@ export async function handleComboChat({
             }
           }
           log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
+          trace("targetFailed", {
+            targetFailed: true,
+            comboFallback: true,
+            targetIndex: i,
+            targetCount,
+            provider,
+            connectionId: targetWithConnection.connectionId ?? null,
+            accountId: targetWithConnection.connectionId ?? null,
+            status: result.status,
+            error: errorText,
+          });
 
           // #5976: per-model-quota providers (Gemini, GitHub, etc.) multiplex models
           // behind one connection. A model-level 500 must NOT cool down the entire

@@ -5,6 +5,8 @@ import { resolveResponsesApiModel } from "@/app/api/internal/codex-responses-ws/
 import { getModelInfo } from "@/sse/services/model";
 import { getComboByName } from "@/lib/db/combos";
 import { resolveKeepaliveThreshold } from "@omniroute/open-sse/utils/keepaliveThreshold";
+import { generateRequestId } from "@/shared/utils/requestId";
+import * as log from "@/sse/utils/logger";
 
 // NOTE: We do NOT call initTranslators() here — the translator registry is
 // bootstrapped at module level inside open-sse/translator/index.ts when it
@@ -88,6 +90,16 @@ async function postHandler(request: any, context: any, preParsedBody: any = null
     request,
     preParsedBody
   );
+  const requestId = request.headers?.get?.("x-request-id") || generateRequestId();
+  const sessionKey =
+    request.headers?.get?.("x-omniroute-session-key") ||
+    request.headers?.get?.("x-session-id") ||
+    null;
+  log.info("RESPONSES_TRACE", "responses request start", {
+    requestId,
+    sessionKey,
+    combo: resolvedBody?.model ?? null,
+  });
   const accept = String(request.headers?.get?.("accept") || "").toLowerCase();
   if (accept.includes("text/event-stream")) {
     // Adaptive threshold: web-session and anonymous-fallback providers are slower
@@ -95,12 +107,20 @@ async function postHandler(request: any, context: any, preParsedBody: any = null
     // Reuse resolvedBody.model — no extra clone/parse needed (#4041).
     const model = resolvedBody?.model;
     const thresholdMs = resolveKeepaliveThreshold(model);
-    return await withEarlyStreamKeepalive(handleChat(resolved, null, resolvedBody), {
+    return await withEarlyStreamKeepalive(handleChat(resolved, null, resolvedBody, requestId), {
       signal: request.signal,
       thresholdMs,
+      requestId,
+      traceLog: (event, data = {}) =>
+        log.info("RESPONSES_TRACE", event, {
+          requestId,
+          sessionKey,
+          combo: resolvedBody?.model ?? null,
+          ...data,
+        }),
     });
   }
-  return await handleChat(resolved, null, resolvedBody);
+  return await handleChat(resolved, null, resolvedBody, requestId);
 }
 
 export const POST = withInjectionGuard(postHandler);

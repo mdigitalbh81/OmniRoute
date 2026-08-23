@@ -56,6 +56,8 @@ export type EarlyStreamKeepaliveOptions = {
   keepaliveFrame?: Uint8Array;
   /** Extra headers to include in the keepalive response (e.g. X-Correlation-Id). */
   extraHeaders?: Record<string, string>;
+  requestId?: string | null;
+  traceLog?: (event: string, data?: Record<string, unknown>) => void;
 };
 
 type SettledHandler = { ok: true; response: Response } | { ok: false; error: unknown };
@@ -69,6 +71,14 @@ export async function withEarlyStreamKeepalive(
   const signal = options.signal ?? null;
   const keepaliveFrame = options.keepaliveFrame ?? KEEPALIVE_FRAME;
   const extraHeaders = options.extraHeaders ?? {};
+  const startedAt = Date.now();
+  const trace = (event: string, data: Record<string, unknown> = {}) => {
+    options.traceLog?.(event, {
+      requestId: options.requestId ?? null,
+      elapsedMs: Date.now() - startedAt,
+      ...data,
+    });
+  };
 
   // Settle into a tagged result so neither race branch leaves an unhandled
   // rejection when the threshold timer wins.
@@ -91,6 +101,7 @@ export async function withEarlyStreamKeepalive(
     if (raced.result.ok) return raced.result.response;
     throw raced.result.error;
   }
+  trace("keepaliveCommitted", { keepaliveCommitted: true });
 
   // Slow path — open the SSE stream now and keep it warm until the handler resolves.
   // Cleanup state is hoisted so both start() and cancel() (client disconnect) can stop
@@ -147,6 +158,7 @@ export async function withEarlyStreamKeepalive(
         if (aborted) return; // client disconnected while we were waiting
 
         if (!result.ok) {
+          trace("streamReadError", { streamReadError: true, reason: "handlerRejected" });
           // Handler rejected — emit a generic error frame (never the raw error/stack).
           controller.enqueue(ERROR_FRAME);
         } else {
@@ -168,6 +180,11 @@ export async function withEarlyStreamKeepalive(
                 }
               }
             } catch (readErr) {
+              trace("streamReadError", {
+                streamReadError: true,
+                bytesForwarded,
+                message: readErr instanceof Error ? readErr.message : String(readErr),
+              });
               // Upstream stream failed mid-flight. Only emit an error frame if
               // NO content was forwarded yet — otherwise the client already
               // received partial content and a late error frame would corrupt
@@ -178,6 +195,12 @@ export async function withEarlyStreamKeepalive(
               }
             }
           } else {
+            trace("streamReadError", {
+              streamReadError: true,
+              responseStatus: response.status,
+              responseContentType: contentType,
+              reason: "nonSseResponseAfterCommit",
+            });
             // Non-SSE response (e.g. a JSON error) reached us after we already
             // committed to a 200 event-stream, so the HTTP status can no longer
             // change. Frame the (already-sanitized) body as an in-band error event
@@ -190,6 +213,7 @@ export async function withEarlyStreamKeepalive(
           }
         }
       } catch {
+        trace("streamReadError", { streamReadError: true, reason: "keepaliveUnhandledError" });
         // Defensive: never surface a raw error/stack to the client.
         if (!aborted) {
           try {
@@ -203,6 +227,7 @@ export async function withEarlyStreamKeepalive(
         signal?.removeEventListener("abort", onAbort);
         try {
           controller.close();
+          trace("streamClosed", { streamClosed: true });
         } catch {
           /* already closed */
         }
