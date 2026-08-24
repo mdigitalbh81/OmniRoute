@@ -1208,6 +1208,50 @@ test("markAccountUnavailable applies a model-only lockout for compatible provide
   assert.equal(Number(updated.errorCode), 429);
 });
 
+test("Antigravity Opus family lockout skips all exhausted accounts but keeps Gemini eligible", async () => {
+  fallback.clearAllModelLockouts();
+  const accounts = [
+    await seedConnection("antigravity", {
+      authType: "oauth",
+      name: "antigravity-opus-a",
+      accessToken: "antigravity-opus-a-access",
+      refreshToken: "antigravity-opus-a-refresh",
+    }),
+    await seedConnection("antigravity", {
+      authType: "oauth",
+      name: "antigravity-opus-b",
+      accessToken: "antigravity-opus-b-access",
+      refreshToken: "antigravity-opus-b-refresh",
+    }),
+    await seedConnection("antigravity", {
+      authType: "oauth",
+      name: "antigravity-opus-c",
+      accessToken: "antigravity-opus-c-access",
+      refreshToken: "antigravity-opus-c-refresh",
+    }),
+  ];
+  const opusModel = "claude-opus-4-6-thinking";
+  const geminiModel = "gemini-3.5-flash-high";
+
+  for (const account of accounts) {
+    await auth.markAccountUnavailable(
+      account.id,
+      429,
+      "You have exhausted your capacity on this model. Your quota will reset after 24h.",
+      "antigravity",
+      opusModel
+    );
+  }
+
+  const blockedOpus = await auth.getProviderCredentials("antigravity", null, null, opusModel);
+  const availableGemini = await auth.getProviderCredentials("antigravity", null, null, geminiModel);
+
+  assert.equal(blockedOpus.allRateLimited, true);
+  assert.equal(blockedOpus.cooldownScope, "model");
+  assert.equal(Number(blockedOpus.lastErrorCode), 429);
+  assert.equal(availableGemini.connectionId, accounts[0].id);
+});
+
 // #3027 — a per-model subscription/permission 403 from a passthrough provider
 // (ollama-cloud) must lock only the paid model, not the whole connection.
 test("markAccountUnavailable: ollama-cloud per-model subscription 403 locks the model, not the connection (#3027)", async () => {

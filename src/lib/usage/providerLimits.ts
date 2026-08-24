@@ -27,6 +27,8 @@ import {
   extractCodeAssistOnboardTierId,
   extractCodeAssistSubscriptionTier,
 } from "@omniroute/open-sse/services/codeAssistSubscription.ts";
+import { isAccountUnavailable } from "@omniroute/open-sse/services/accountFallback.ts";
+import { getAntigravityQuotaFamily } from "@omniroute/open-sse/services/antigravityQuotaFamily.ts";
 import { runWithProxyContext } from "@omniroute/open-sse/utils/proxyFetch.ts";
 import { onUsageRecorded } from "./usageEvents";
 import {
@@ -414,6 +416,7 @@ export function hasUsableQuota(usage: JsonRecord): boolean {
   if (!isRecord(quotas)) return false;
   for (const value of Object.values(quotas)) {
     if (!isRecord(value)) continue;
+    if (value.fractionReported === false) continue;
     if (value.unlimited === true) return true;
     const remaining =
       typeof value.remaining === "number"
@@ -432,6 +435,13 @@ export async function maybeClearRecoveredQuotaState(
 ): Promise<ProviderConnectionLike> {
   if (!hasUsableQuota(usage)) return connection;
   if (isTerminalStatusForQuotaRecovery(connection.testStatus)) return connection;
+
+  if (isAccountUnavailable(connection.rateLimitedUntil)) {
+    const cooldownCameFrom429 = isQuotaRefreshProtected429Cooldown(connection);
+    if (cooldownCameFrom429 && !hasPositiveQuotaRecoveryEvidenceForFuture429(connection, usage)) {
+      return connection;
+    }
+  }
 
   const hasTransientState =
     connection.testStatus === "unavailable" ||
@@ -486,6 +496,71 @@ export async function maybeClearRecoveredQuotaState(
     rateLimitedUntil: null,
     backoffLevel: 0,
   };
+}
+
+function hasPositiveQuotaRecoveryEvidenceForFuture429(
+  connection: ProviderConnectionLike,
+  usage: JsonRecord
+): boolean {
+  const quotas = usage?.quotas;
+  if (!isRecord(quotas)) return false;
+
+  if (connection.provider !== "antigravity" && connection.provider !== "agy") {
+    return hasUsableQuota(usage);
+  }
+
+  const blockedFamily = getAntigravityBlockedQuotaFamily(connection);
+  const quotaEntries = Object.entries(quotas)
+    .filter(([, value]) => isRecord(value))
+    .filter(([model]) => {
+      if (!blockedFamily) return true;
+      return getAntigravityQuotaFamily(model) === blockedFamily;
+    })
+    .map(([, value]) => value as JsonRecord);
+  if (quotaEntries.length === 0) return false;
+  if (quotaEntries.some((value) => value.fractionReported !== true)) return false;
+
+  return quotaEntries.some((value) => {
+    if (value.quotaSource !== "retrieveUserQuota") return false;
+    return quotaHasRemainingCapacity(value);
+  });
+}
+
+function isQuotaRefreshProtected429Cooldown(connection: ProviderConnectionLike): boolean {
+  if (Number(connection.errorCode) === 429) return true;
+  if (
+    connection.lastErrorType === "rate_limited" ||
+    connection.lastErrorType === "quota_exhausted"
+  ) {
+    return true;
+  }
+  // Antigravity's executor writes rate_limited_until directly on full-quota 429s
+  // before the auth recovery path records error metadata.
+  return connection.provider === "antigravity" || connection.provider === "agy";
+}
+
+function getAntigravityBlockedQuotaFamily(
+  connection: ProviderConnectionLike
+): "gemini" | "claude" | "other" | null {
+  const message = typeof connection.lastError === "string" ? connection.lastError : "";
+  const modelMatch =
+    /\bModel\s+([^\s:]+)/i.exec(message) ||
+    /\bfor\s+([^\s:]+)\s*:/i.exec(message) ||
+    /\bmodel\s+([^\s:]+)/i.exec(message);
+  const model = modelMatch?.[1];
+  if (!model) return null;
+  return getAntigravityQuotaFamily(model);
+}
+
+function quotaHasRemainingCapacity(quota: JsonRecord): boolean {
+  if (quota.unlimited === true) return true;
+  const remaining =
+    typeof quota.remaining === "number"
+      ? quota.remaining
+      : typeof quota.remainingPercentage === "number"
+        ? quota.remainingPercentage
+        : null;
+  return remaining !== null && remaining > 0;
 }
 
 async function syncExpiredStatusIfNeeded(

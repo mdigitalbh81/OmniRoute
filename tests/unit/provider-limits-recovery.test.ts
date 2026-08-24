@@ -86,12 +86,9 @@ test("successful GLM quota refresh clears transient rate-limit state", async () 
   const connection = await createGlmConnectionWithTransientCooldown();
   const connectionId = (connection as { id: string }).id;
 
-  await withMockedFetch(
-    (() => glmQuotaResponse()) as typeof fetch,
-    async () => {
-      await providerLimits.fetchAndPersistProviderLimits(connectionId, "manual");
-    }
-  );
+  await withMockedFetch((() => glmQuotaResponse()) as typeof fetch, async () => {
+    await providerLimits.fetchAndPersistProviderLimits(connectionId, "manual");
+  });
 
   const updated = (await providersDb.getProviderConnectionById(connectionId)) as Record<
     string,
@@ -122,12 +119,9 @@ test("successful quota refresh does not clear terminal credits_exhausted status"
   const connection = await createGlmConnectionWithStatus("credits_exhausted");
   const connectionId = (connection as { id: string }).id;
 
-  await withMockedFetch(
-    (() => glmQuotaResponse()) as typeof fetch,
-    async () => {
-      await providerLimits.fetchAndPersistProviderLimits(connectionId, "manual");
-    }
-  );
+  await withMockedFetch((() => glmQuotaResponse()) as typeof fetch, async () => {
+    await providerLimits.fetchAndPersistProviderLimits(connectionId, "manual");
+  });
 
   const updated = (await providersDb.getProviderConnectionById(connectionId)) as Record<
     string,
@@ -141,12 +135,9 @@ test("successful quota refresh does not clear terminal banned status", async () 
   const connection = await createGlmConnectionWithStatus("banned");
   const connectionId = (connection as { id: string }).id;
 
-  await withMockedFetch(
-    (() => glmQuotaResponse()) as typeof fetch,
-    async () => {
-      await providerLimits.fetchAndPersistProviderLimits(connectionId, "manual");
-    }
-  );
+  await withMockedFetch((() => glmQuotaResponse()) as typeof fetch, async () => {
+    await providerLimits.fetchAndPersistProviderLimits(connectionId, "manual");
+  });
 
   const updated = (await providersDb.getProviderConnectionById(connectionId)) as Record<
     string,
@@ -159,12 +150,9 @@ test("successful quota refresh does not clear terminal expired status", async ()
   const connection = await createGlmConnectionWithStatus("expired");
   const connectionId = (connection as { id: string }).id;
 
-  await withMockedFetch(
-    (() => glmQuotaResponse()) as typeof fetch,
-    async () => {
-      await providerLimits.fetchAndPersistProviderLimits(connectionId, "manual");
-    }
-  );
+  await withMockedFetch((() => glmQuotaResponse()) as typeof fetch, async () => {
+    await providerLimits.fetchAndPersistProviderLimits(connectionId, "manual");
+  });
 
   const updated = (await providersDb.getProviderConnectionById(connectionId)) as Record<
     string,
@@ -299,9 +287,10 @@ test("CAS primitive aborts when state changed concurrently", async () => {
 test("quota recovery path does NOT overwrite a concurrent mark (TOCTOU closed)", async () => {
   const created = await createGlmConnectionWithTransientCooldown();
   const connectionId = (created as { id: string }).id;
-  const snapshotBeforeClear = (await providersDb.getProviderConnectionById(
-    connectionId
-  )) as Record<string, unknown>;
+  const snapshotBeforeClear = (await providersDb.getProviderConnectionById(connectionId)) as Record<
+    string,
+    unknown
+  >;
   const expectedLastErrorAt = (snapshotBeforeClear.lastErrorAt as string) ?? null;
 
   // Mock fetch so that DURING the quota fetch (between read and clear), a
@@ -336,4 +325,217 @@ test("quota recovery path does NOT overwrite a concurrent mark (TOCTOU closed)",
   assert.equal(after.testStatus, "unavailable", "fresh testStatus must survive");
   assert.equal(after.backoffLevel, 3, "fresh backoff level must survive");
   assert.equal(after.lastError, "fresh concurrent 429");
+});
+
+async function createAntigravityConnectionWithTransientCooldown() {
+  return providersDb.createProviderConnection({
+    provider: "antigravity",
+    authType: "oauth",
+    name: `Antigravity Recovery ${Date.now()} ${Math.random()}`,
+    accessToken: "agy-access-token",
+    refreshToken: "agy-refresh-token",
+    expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    testStatus: "unavailable",
+    rateLimitedUntil: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    lastError: "rate limited",
+    lastErrorType: "rate_limited",
+    lastErrorSource: "executor",
+    errorCode: 429,
+    backoffLevel: 2,
+  });
+}
+
+test("Antigravity 429 cooldown survives quota refresh with unknown remainingFraction", async () => {
+  const connection = await createAntigravityConnectionWithTransientCooldown();
+  const connectionId = (connection as { id: string }).id;
+
+  await providerLimits.maybeClearRecoveredQuotaState(connection as never, {
+    quotas: {
+      "claude-opus-4-6-thinking": {
+        used: 1000,
+        total: 1000,
+        remainingPercentage: 0,
+        resetAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        unlimited: false,
+        fractionReported: false,
+        quotaSource: "fetchAvailableModels",
+      },
+      "gemini-3.5-flash-high": {
+        used: 0,
+        total: 1000,
+        remainingPercentage: 100,
+        resetAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        unlimited: false,
+        fractionReported: false,
+        quotaSource: "fetchAvailableModels",
+      },
+    },
+  });
+
+  const updated = (await providersDb.getProviderConnectionById(connectionId)) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(updated.testStatus, "unavailable");
+  assert.equal(updated.lastErrorType, "rate_limited");
+  assert.equal(Number(updated.errorCode), 429);
+  assert.ok(
+    typeof updated.rateLimitedUntil === "string" &&
+      new Date(updated.rateLimitedUntil).getTime() > Date.now(),
+    "future cooldown should remain"
+  );
+});
+
+test("Antigravity confirmed quota recovery can clear matching 429 cooldown with CAS", async () => {
+  const connection = await createAntigravityConnectionWithTransientCooldown();
+  const connectionId = (connection as { id: string }).id;
+
+  await providerLimits.maybeClearRecoveredQuotaState(connection as never, {
+    quotas: {
+      "claude-opus-4-6-thinking": {
+        used: 100,
+        total: 1000,
+        remainingPercentage: 90,
+        resetAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        unlimited: false,
+        fractionReported: true,
+        quotaSource: "retrieveUserQuota",
+      },
+    },
+  });
+
+  const updated = (await providersDb.getProviderConnectionById(connectionId)) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(updated.testStatus, "active");
+  assert.equal(updated.rateLimitedUntil, undefined);
+  assert.equal(updated.errorCode, undefined);
+  assert.equal(updated.backoffLevel, 0);
+});
+
+test("Antigravity confirmed quota recovery preserves newer concurrent 429 state", async () => {
+  const connection = await createAntigravityConnectionWithTransientCooldown();
+  const connectionId = (connection as { id: string }).id;
+  const newLastErrorAt = new Date(Date.now() + 1000).toISOString();
+  const newRateLimitedUntil = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+
+  await providersDb.updateProviderConnection(connectionId, {
+    lastErrorAt: newLastErrorAt,
+    rateLimitedUntil: newRateLimitedUntil,
+    lastError: "fresh antigravity 429",
+    errorCode: 429,
+    backoffLevel: 4,
+  });
+
+  await providerLimits.maybeClearRecoveredQuotaState(connection as never, {
+    quotas: {
+      "claude-opus-4-6-thinking": {
+        used: 100,
+        total: 1000,
+        remainingPercentage: 90,
+        resetAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        unlimited: false,
+        fractionReported: true,
+        quotaSource: "retrieveUserQuota",
+      },
+    },
+  });
+
+  const updated = (await providersDb.getProviderConnectionById(connectionId)) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(updated.testStatus, "unavailable");
+  assert.equal(updated.lastErrorAt, newLastErrorAt);
+  assert.equal(updated.rateLimitedUntil, newRateLimitedUntil);
+  assert.equal(updated.backoffLevel, 4);
+  assert.equal(updated.lastError, "fresh antigravity 429");
+});
+
+test("Antigravity quota availability from another family does not clear an Opus 429 cooldown", async () => {
+  const connection = await createAntigravityConnectionWithTransientCooldown();
+  const connectionId = (connection as { id: string }).id;
+
+  await providersDb.updateProviderConnection(connectionId, {
+    lastError: "Model claude-opus-4-6-thinking quota_exhausted",
+    lastErrorType: "quota_exhausted",
+  });
+  const blockedConnection = await providersDb.getProviderConnectionById(connectionId);
+
+  await providerLimits.maybeClearRecoveredQuotaState(blockedConnection as never, {
+    quotas: {
+      "claude-opus-4-6-thinking": {
+        used: 1000,
+        total: 1000,
+        remainingPercentage: 0,
+        resetAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        unlimited: false,
+        fractionReported: false,
+        quotaSource: "fetchAvailableModels",
+      },
+      "gemini-3.5-flash-high": {
+        used: 100,
+        total: 1000,
+        remainingPercentage: 90,
+        resetAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        unlimited: false,
+        fractionReported: true,
+        quotaSource: "retrieveUserQuota",
+      },
+    },
+  });
+
+  const updated = (await providersDb.getProviderConnectionById(connectionId)) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(updated.testStatus, "unavailable");
+  assert.equal(updated.lastErrorType, "quota_exhausted");
+  assert.equal(Number(updated.errorCode), 429);
+  assert.ok(updated.rateLimitedUntil);
+});
+
+test("Antigravity 429 cooldown with no error metadata survives unknown quota refresh", async () => {
+  const connection = await createAntigravityConnectionWithTransientCooldown();
+  const connectionId = (connection as { id: string }).id;
+  await providersDb.updateProviderConnection(connectionId, {
+    testStatus: "active",
+    lastError: null,
+    lastErrorAt: null,
+    lastErrorType: null,
+    lastErrorSource: null,
+    errorCode: null,
+    backoffLevel: 0,
+  });
+  const cooledConnection = await providersDb.getProviderConnectionById(connectionId);
+
+  await providerLimits.maybeClearRecoveredQuotaState(cooledConnection as never, {
+    quotas: {
+      "claude-opus-4-6-thinking": {
+        used: 1000,
+        total: 1000,
+        remainingPercentage: 0,
+        resetAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        unlimited: false,
+        fractionReported: false,
+        quotaSource: "fetchAvailableModels",
+      },
+      "gemini-3.5-flash-high": {
+        used: 100,
+        total: 1000,
+        remainingPercentage: 90,
+        resetAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        unlimited: false,
+        fractionReported: true,
+        quotaSource: "retrieveUserQuota",
+      },
+    },
+  });
+
+  const updated = (await providersDb.getProviderConnectionById(connectionId)) as Record<
+    string,
+    unknown
+  >;
+  assert.ok(updated.rateLimitedUntil, "Antigravity executor-only cooldown should remain");
 });
