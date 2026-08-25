@@ -60,3 +60,39 @@ test("#5015 a connection with no snapshot is not reported exhausted", () => {
     "no snapshot → no hydration → not exhausted"
   );
 });
+
+test("hydration does not promote one exhausted window plus one positive sibling to global exhaustion", () => {
+  const connectionId = "conn-sibling-window-not-global";
+  quotaCache.__clearForTests();
+
+  quotaSnapshotsDb.saveQuotaSnapshot({
+    provider: "antigravity",
+    connection_id: connectionId,
+    window_key: "claude-opus-4-6-thinking",
+    remaining_percentage: 0,
+    is_exhausted: 1,
+    next_reset_at: new Date(Date.now() + 60_000).toISOString(),
+    window_duration_ms: null,
+    raw_data: JSON.stringify({ source: "test" }),
+  });
+  quotaSnapshotsDb.saveQuotaSnapshot({
+    provider: "antigravity",
+    connection_id: connectionId,
+    window_key: "gemini-3.5-flash-high",
+    remaining_percentage: 100,
+    is_exhausted: 0,
+    next_reset_at: new Date(Date.now() + 120_000).toISOString(),
+    window_duration_ms: null,
+    raw_data: JSON.stringify({ source: "test" }),
+  });
+
+  assert.equal(quotaCache.isAccountQuotaExhausted(connectionId), false);
+  assert.equal(
+    quotaCache.isQuotaExhaustedForRequest(connectionId, "antigravity", "claude-opus-4-6-thinking"),
+    true
+  );
+  assert.equal(
+    quotaCache.isQuotaExhaustedForRequest(connectionId, "antigravity", "gemini-3.5-flash-high"),
+    false
+  );
+});

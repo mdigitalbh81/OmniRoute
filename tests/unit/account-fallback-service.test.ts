@@ -460,6 +460,31 @@ test("Codex Spark 429s are scoped away from normal Codex models", () => {
   clearModelLock("codex", connectionId, "gpt-5.3-codex");
 });
 
+test("Antigravity family 429s are scoped away from sibling families", () => {
+  const connectionId = `antigravity-${Date.now()}`;
+  clearModelLock("antigravity", connectionId, "claude-opus-4-6-thinking");
+  clearModelLock("antigravity", connectionId, "gemini-3.5-flash-high");
+
+  assert.equal(hasPerModelQuota("antigravity", "claude-opus-4-6-thinking"), true);
+  assert.equal(shouldMarkAccountExhaustedFrom429("antigravity", "claude-opus-4-6-thinking"), false);
+  assert.equal(
+    lockModelIfPerModelQuota(
+      "antigravity",
+      connectionId,
+      "claude-opus-4-6-thinking",
+      RateLimitReason.QUOTA_EXHAUSTED,
+      30_000
+    ),
+    true
+  );
+  assert.equal(isModelLocked("antigravity", connectionId, "claude-opus-4-6-thinking"), true);
+  assert.equal(isModelLocked("antigravity", connectionId, "claude-sonnet-4-6"), true);
+  assert.equal(isModelLocked("antigravity", connectionId, "gemini-3.5-flash-high"), false);
+
+  clearModelLock("antigravity", connectionId, "claude-opus-4-6-thinking");
+  clearModelLock("antigravity", connectionId, "gemini-3.5-flash-high");
+});
+
 test("shouldMarkAccountExhaustedFrom429 skips connection-wide lockout for GitHub (#1624)", () => {
   assert.equal(shouldMarkAccountExhaustedFrom429("github", "gpt-5.1-codex-max"), false);
   assert.equal(shouldMarkAccountExhaustedFrom429("github", "gpt-5-mini"), false);

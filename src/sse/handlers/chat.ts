@@ -1720,7 +1720,7 @@ async function handleSingleModelChat(
           result.status === 429 &&
           shouldMarkAccountExhaustedFrom429(provider, model, passthroughModels, failureKind)
         ) {
-          markAccountExhaustedFrom429(credentials.connectionId, provider);
+          markAccountExhaustedFrom429(credentials.connectionId, provider, model);
         }
       }
 

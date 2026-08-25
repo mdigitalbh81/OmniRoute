@@ -24,6 +24,10 @@ import {
 } from "@/lib/db/quotaSnapshots";
 import { recordProviderQuotaResetEventIfChanged } from "@/lib/db/quotaResetEvents";
 import { getCodexQuotaWindowFilterForModel } from "@omniroute/open-sse/config/codexQuotaScopes.ts";
+import {
+  getAntigravityQuotaFamily,
+  getQuotaScopedModelForProvider,
+} from "@omniroute/open-sse/services/antigravityQuotaFamily.ts";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -40,6 +44,7 @@ interface QuotaCacheEntry {
   exhausted: boolean;
   nextResetAt: string | null;
   windowDurationMs?: number | null; // T08: optional rolling window duration
+  exhaustedScopes?: Record<string, { fetchedAt: number; nextResetAt: string | null }>;
 }
 
 interface QuotaWindowStatus {
@@ -109,6 +114,103 @@ function normalizeWindowKey(value: unknown): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
+}
+
+function isAntigravityProvider(provider: string | null | undefined): boolean {
+  return provider === "antigravity" || provider === "agy";
+}
+
+function antigravityWindowMatchesFamily(
+  windowName: string,
+  family: ReturnType<typeof getAntigravityQuotaFamily>,
+  requestedModel: string | null | undefined
+): boolean {
+  const normalizedWindow = normalizeWindowKey(windowName);
+  if (!normalizedWindow) return false;
+
+  if (family === "gemini") return normalizedWindow.includes("gemini");
+  if (family === "claude") {
+    return (
+      normalizedWindow.includes("claude") ||
+      normalizedWindow.includes("cloud") ||
+      normalizedWindow.includes("anthropic")
+    );
+  }
+
+  const normalizedModel = normalizeWindowKey(
+    String(requestedModel || "").replace(/^antigravity\//i, "")
+  );
+  return Boolean(normalizedModel && normalizedWindow.includes(normalizedModel));
+}
+
+function isReportedPositiveQuota(rawQuota: unknown, quota: QuotaInfo): boolean {
+  if (!rawQuota || typeof rawQuota !== "object") return quota.remainingPercentage > 0;
+  const raw = rawQuota as Record<string, unknown>;
+  if (raw.fractionReported === false) return false;
+  return quota.remainingPercentage > 0;
+}
+
+function getActiveScopedExhaustions(
+  entry: QuotaCacheEntry,
+  now = Date.now()
+): Record<string, { fetchedAt: number; nextResetAt: string | null }> {
+  const active: Record<string, { fetchedAt: number; nextResetAt: string | null }> = {};
+  for (const [scope, state] of Object.entries(entry.exhaustedScopes || {})) {
+    if (state.nextResetAt) {
+      const resetMs = parseDate(state.nextResetAt);
+      if (resetMs !== null && resetMs <= now) continue;
+    } else if (now - state.fetchedAt > EXHAUSTED_TTL_MS) {
+      continue;
+    }
+    active[scope] = state;
+  }
+  return active;
+}
+
+function hasActiveScopedExhaustion(
+  entry: QuotaCacheEntry,
+  provider: string,
+  requestedModel: string | null
+): boolean {
+  if (!requestedModel) return false;
+  const scope = getQuotaScopedModelForProvider(provider, requestedModel);
+  if (!scope) return false;
+  const activeScopes = getActiveScopedExhaustions(entry);
+  if (Object.keys(activeScopes).length !== Object.keys(entry.exhaustedScopes || {}).length) {
+    entry.exhaustedScopes = Object.keys(activeScopes).length > 0 ? activeScopes : undefined;
+    entry.exhausted = isExhausted(entry.quotas) || Boolean(entry.exhaustedScopes);
+  }
+  return Boolean(activeScopes[scope]);
+}
+
+function mergePreservedScopedExhaustions(
+  provider: string,
+  rawQuotas: Record<string, any>,
+  quotas: Record<string, QuotaInfo>,
+  prior?: QuotaCacheEntry
+): Record<string, { fetchedAt: number; nextResetAt: string | null }> | undefined {
+  if (!isAntigravityProvider(provider) || !prior?.exhaustedScopes) return undefined;
+
+  const activeScopes = getActiveScopedExhaustions(prior);
+  for (const [windowKey, quota] of Object.entries(quotas)) {
+    const rawQuota = rawQuotas[windowKey];
+    if (!isReportedPositiveQuota(rawQuota, quota)) continue;
+    const scope = getQuotaScopedModelForProvider(provider, windowKey);
+    if (scope) delete activeScopes[scope];
+  }
+
+  return Object.keys(activeScopes).length > 0 ? activeScopes : undefined;
+}
+
+function getAntigravityScopedQuotaWindows(
+  quotas: Record<string, QuotaInfo>,
+  requestedModel: string | null
+): string[] {
+  if (!requestedModel) return [];
+  const family = getAntigravityQuotaFamily(requestedModel);
+  return Object.keys(quotas).filter((windowName) =>
+    antigravityWindowMatchesFamily(windowName, family, requestedModel)
+  );
 }
 
 function resolveQuotaWindow(
@@ -210,10 +312,35 @@ export function isQuotaExhaustedForRequest(
   provider: string,
   requestedModel: string | null = null
 ): boolean {
-  if (!isAccountQuotaExhausted(connectionId)) return false;
-  if (provider !== "codex" || !requestedModel) return true;
-  const entry = getQuotaCache(connectionId);
-  const quotaNames = Object.keys(entry?.quotas || {});
+  const accountExhausted = isAccountQuotaExhausted(connectionId);
+  const entry = cache.get(connectionId) || hydrateQuotaCacheFromSnapshots(connectionId);
+  if (!entry) return false;
+
+  if (isAntigravityProvider(provider) && requestedModel) {
+    if (hasActiveScopedExhaustion(entry, provider, requestedModel)) return true;
+    const scopedWindowNames = getAntigravityScopedQuotaWindows(entry.quotas, requestedModel);
+    if (scopedWindowNames.length === 0) return false;
+    return scopedWindowNames.some(
+      (windowName) => getQuotaWindowStatus(connectionId, windowName, 100)?.reachedThreshold
+    );
+  }
+
+  if (provider === "codex" && requestedModel) {
+    const quotaNames = Object.keys(entry?.quotas || {});
+    if (quotaNames.length === 0) return accountExhausted;
+    const filterWindow = getCodexQuotaWindowFilterForModel(requestedModel);
+    const scopedWindowNames = quotaNames.filter((windowName) => filterWindow?.(windowName));
+    if (scopedWindowNames.length === 0) return accountExhausted;
+    return scopedWindowNames.every(
+      (windowName) => getQuotaWindowStatus(connectionId, windowName, 100)?.reachedThreshold
+    );
+  }
+
+  if (!accountExhausted) return false;
+  if (!requestedModel) return true;
+  if (provider !== "codex") return true;
+  const refreshedEntry = getQuotaCache(connectionId);
+  const quotaNames = Object.keys(refreshedEntry?.quotas || {});
   if (quotaNames.length === 0) return true;
   const filterWindow = getCodexQuotaWindowFilterForModel(requestedModel);
   const scopedWindowNames = quotaNames.filter((windowName) => filterWindow?.(windowName));
@@ -234,10 +361,11 @@ export function setQuotaCache(
   rawQuotas: Record<string, any>
 ) {
   const quotas = normalizeQuotas(rawQuotas);
-  const exhausted = isExhausted(quotas);
   // #4438 — capture the prior entry BEFORE overwriting the cache so we can skip
   // redundant snapshot writes for idle connections whose quota didn't change.
   const prior = cache.get(connectionId);
+  const exhaustedScopes = mergePreservedScopedExhaustions(provider, rawQuotas, quotas, prior);
+  const exhausted = isExhausted(quotas) || Boolean(exhaustedScopes);
   const entry: QuotaCacheEntry = {
     connectionId,
     provider,
@@ -245,6 +373,7 @@ export function setQuotaCache(
     fetchedAt: Date.now(),
     exhausted,
     nextResetAt: exhausted ? earliestResetAt(quotas) : null,
+    exhaustedScopes,
   };
   cache.set(connectionId, entry);
 
@@ -315,7 +444,6 @@ function hydrateQuotaCacheFromSnapshots(connectionId: string): QuotaCacheEntry |
   const quotas: Record<string, QuotaInfo> = {};
   let provider = "";
   let fetchedAt = 0;
-  let exhausted = false;
   let windowDurationMs: number | null = null;
 
   for (const snapshot of snapshots) {
@@ -336,7 +464,6 @@ function hydrateQuotaCacheFromSnapshots(connectionId: string): QuotaCacheEntry |
       ),
       resetAt: camelSnapshot.nextResetAt ?? snapshot.next_reset_at ?? null,
     };
-    exhausted = exhausted || (camelSnapshot.isExhausted ?? snapshot.is_exhausted) === 1;
     const snapshotWindowDurationMs =
       camelSnapshot.windowDurationMs ?? snapshot.window_duration_ms ?? null;
     if (snapshotWindowDurationMs && snapshotWindowDurationMs > 0) {
@@ -349,6 +476,7 @@ function hydrateQuotaCacheFromSnapshots(connectionId: string): QuotaCacheEntry |
 
   if (Object.keys(quotas).length === 0) return null;
 
+  const exhausted = isExhausted(quotas);
   const entry: QuotaCacheEntry = {
     connectionId,
     provider,
@@ -369,6 +497,11 @@ function hydrateQuotaCacheFromSnapshots(connectionId: string): QuotaCacheEntry |
 export function isAccountQuotaExhausted(connectionId: string): boolean {
   const entry = cache.get(connectionId) || hydrateQuotaCacheFromSnapshots(connectionId);
   if (!entry) return false;
+  if (entry.exhaustedScopes) {
+    const activeScopes = getActiveScopedExhaustions(entry);
+    entry.exhaustedScopes = Object.keys(activeScopes).length > 0 ? activeScopes : undefined;
+    entry.exhausted = isExhausted(entry.quotas) || Boolean(entry.exhaustedScopes);
+  }
   if (!entry.exhausted) return false;
 
   const now = Date.now();
@@ -433,7 +566,33 @@ export function getQuotaWindowStatus(
  * Mark an account as quota-exhausted from a 429 response (no quota data available).
  * Uses 5-minute fixed TTL since we don't know the actual resetAt.
  */
-export function markAccountExhaustedFrom429(connectionId: string, provider: string) {
+export function markAccountExhaustedFrom429(
+  connectionId: string,
+  provider: string,
+  requestedModel: string | null = null
+) {
+  const scopedModel = requestedModel
+    ? getQuotaScopedModelForProvider(provider, requestedModel)
+    : null;
+  if (isAntigravityProvider(provider) && scopedModel) {
+    const prior = cache.get(connectionId) || hydrateQuotaCacheFromSnapshots(connectionId);
+    const exhaustedScopes = {
+      ...(prior?.exhaustedScopes || {}),
+      [scopedModel]: { fetchedAt: Date.now(), nextResetAt: null },
+    };
+    cache.set(connectionId, {
+      connectionId,
+      provider,
+      quotas: prior?.quotas || {},
+      fetchedAt: Date.now(),
+      exhausted: true,
+      nextResetAt: prior?.nextResetAt || null,
+      windowDurationMs: prior?.windowDurationMs ?? null,
+      exhaustedScopes,
+    });
+    return;
+  }
+
   cache.set(connectionId, {
     connectionId,
     provider,

@@ -1252,6 +1252,231 @@ test("Antigravity Opus family lockout skips all exhausted accounts but keeps Gem
   assert.equal(availableGemini.connectionId, accounts[0].id);
 });
 
+test("Antigravity Claude 0% quota blocks Opus but keeps Gemini selectable", async () => {
+  fallback.clearAllModelLockouts();
+  const connection = await seedConnection("antigravity", {
+    authType: "oauth",
+    name: "antigravity-claude-zero-gemini-full",
+    accessToken: "antigravity-claude-zero-access",
+    refreshToken: "antigravity-claude-zero-refresh",
+  });
+
+  quotaCache.setQuotaCache(connection.id, "antigravity", {
+    "claude-opus-4-6-thinking": {
+      remainingPercentage: 0,
+      resetAt: futureIso(60_000),
+      fractionReported: true,
+    },
+    "gemini-3.5-flash-high": {
+      remainingPercentage: 100,
+      resetAt: futureIso(60_000),
+      fractionReported: true,
+    },
+  });
+
+  const blockedOpus = await auth.getProviderCredentials(
+    "antigravity",
+    null,
+    null,
+    "claude-opus-4-6-thinking"
+  );
+  const allowedGemini = await auth.getProviderCredentials(
+    "antigravity",
+    null,
+    null,
+    "gemini-3.5-flash-high"
+  );
+
+  assert.equal(blockedOpus.allRateLimited, true);
+  assert.equal(Number(blockedOpus.lastErrorCode), 429);
+  assert.equal(allowedGemini.connectionId, connection.id);
+});
+
+test("Antigravity markAccountUnavailable scopes Claude 429 without poisoning Gemini", async () => {
+  fallback.clearAllModelLockouts();
+  const connection = await seedConnection("antigravity", {
+    authType: "oauth",
+    name: "antigravity-claude-429-scoped",
+    accessToken: "antigravity-claude-429-access",
+    refreshToken: "antigravity-claude-429-refresh",
+  });
+
+  const result = await auth.markAccountUnavailable(
+    connection.id,
+    429,
+    "You have exhausted your capacity on this model. Your quota will reset after 24h.",
+    "antigravity",
+    "claude-opus-4-6-thinking"
+  );
+  await flushWrites();
+  const updated = await providersDb.getProviderConnectionById(connection.id);
+
+  assert.equal(result.shouldFallback, true);
+  assert.ok(result.cooldownMs > 0);
+  assert.equal(updated.testStatus, "active");
+  assert.equal(updated.rateLimitedUntil, undefined);
+  assert.equal(
+    fallback.isModelLocked("antigravity", connection.id, "claude-opus-4-6-thinking"),
+    true
+  );
+  assert.equal(
+    fallback.isModelLocked("antigravity", connection.id, "gemini-3.5-flash-high"),
+    false
+  );
+
+  const allowedGemini = await auth.getProviderCredentials(
+    "antigravity",
+    null,
+    null,
+    "gemini-3.5-flash-high"
+  );
+  assert.equal(allowedGemini.connectionId, connection.id);
+});
+
+test("Antigravity Gemini 0% quota blocks Gemini without poisoning Claude", async () => {
+  fallback.clearAllModelLockouts();
+  const connection = await seedConnection("antigravity", {
+    authType: "oauth",
+    name: "antigravity-gemini-zero-claude-full",
+    accessToken: "antigravity-gemini-zero-access",
+    refreshToken: "antigravity-gemini-zero-refresh",
+  });
+
+  quotaCache.setQuotaCache(connection.id, "antigravity", {
+    "gemini-3.5-flash-high": {
+      remainingPercentage: 0,
+      resetAt: futureIso(60_000),
+      fractionReported: true,
+    },
+    "claude-opus-4-6-thinking": {
+      remainingPercentage: 100,
+      resetAt: futureIso(60_000),
+      fractionReported: true,
+    },
+  });
+
+  const blockedGemini = await auth.getProviderCredentials(
+    "antigravity",
+    null,
+    null,
+    "gemini-3.5-flash-high"
+  );
+  const allowedClaude = await auth.getProviderCredentials(
+    "antigravity",
+    null,
+    null,
+    "claude-opus-4-6-thinking"
+  );
+
+  assert.equal(blockedGemini.allRateLimited, true);
+  assert.equal(Number(blockedGemini.lastErrorCode), 429);
+  assert.equal(allowedClaude.connectionId, connection.id);
+});
+
+test("Antigravity unknown Claude quota does not clear active Claude 429 cooldown", async () => {
+  fallback.clearAllModelLockouts();
+  const connection = await seedConnection("antigravity", {
+    authType: "oauth",
+    name: "antigravity-unknown-quota-cooldown",
+    accessToken: "antigravity-unknown-access",
+    refreshToken: "antigravity-unknown-refresh",
+  });
+
+  fallback.lockModel(
+    "antigravity",
+    connection.id,
+    "claude-opus-4-6-thinking",
+    "quota_exhausted",
+    60_000
+  );
+  quotaCache.setQuotaCache(connection.id, "antigravity", {
+    "claude-opus-4-6-thinking": {
+      remainingPercentage: 0,
+      resetAt: futureIso(60_000),
+      fractionReported: false,
+    },
+    "gemini-3.5-flash-high": {
+      remainingPercentage: 100,
+      resetAt: futureIso(60_000),
+      fractionReported: true,
+    },
+  });
+
+  const blockedOpus = await auth.getProviderCredentials(
+    "antigravity",
+    null,
+    null,
+    "claude-opus-4-6-thinking"
+  );
+  const allowedGemini = await auth.getProviderCredentials(
+    "antigravity",
+    null,
+    null,
+    "gemini-3.5-flash-high"
+  );
+
+  assert.equal(
+    fallback.isModelLocked("antigravity", connection.id, "claude-opus-4-6-thinking"),
+    true
+  );
+  assert.equal(blockedOpus.allRateLimited, true);
+  assert.equal(blockedOpus.cooldownScope, "model");
+  assert.equal(allowedGemini.connectionId, connection.id);
+});
+
+test("Antigravity all quota families exhausted falls through to Codex", async () => {
+  fallback.clearAllModelLockouts();
+  const antigravity = await seedConnection("antigravity", {
+    authType: "oauth",
+    name: "antigravity-all-families-exhausted",
+    accessToken: "antigravity-all-families-access",
+    refreshToken: "antigravity-all-families-refresh",
+  });
+  const codex = await seedConnection("codex", {
+    authType: "oauth",
+    name: "codex-after-antigravity-exhausted",
+    apiKey: null,
+    accessToken: "codex-after-antigravity-access",
+    refreshToken: "codex-after-antigravity-refresh",
+  });
+
+  quotaCache.setQuotaCache(antigravity.id, "antigravity", {
+    "claude-opus-4-6-thinking": {
+      remainingPercentage: 0,
+      resetAt: futureIso(60_000),
+      fractionReported: true,
+    },
+    "gemini-3.5-flash-high": {
+      remainingPercentage: 0,
+      resetAt: futureIso(60_000),
+      fractionReported: true,
+    },
+    "other-family-weekly": {
+      remainingPercentage: 0,
+      resetAt: futureIso(60_000),
+      fractionReported: true,
+    },
+  });
+
+  const blockedClaude = await auth.getProviderCredentials(
+    "antigravity",
+    null,
+    null,
+    "claude-opus-4-6-thinking"
+  );
+  const blockedGemini = await auth.getProviderCredentials(
+    "antigravity",
+    null,
+    null,
+    "gemini-3.5-flash-high"
+  );
+  const codexSelected = await auth.getProviderCredentials("codex", null, null, "gpt-5.5-high");
+
+  assert.equal(blockedClaude.allRateLimited, true);
+  assert.equal(blockedGemini.allRateLimited, true);
+  assert.equal(codexSelected.connectionId, codex.id);
+});
+
 // #3027 — a per-model subscription/permission 403 from a passthrough provider
 // (ollama-cloud) must lock only the paid model, not the whole connection.
 test("markAccountUnavailable: ollama-cloud per-model subscription 403 locks the model, not the connection (#3027)", async () => {
