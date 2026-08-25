@@ -414,11 +414,7 @@ export async function executeChatWithBreaker({
       capture(() =>
         runWithProxyContext(proxyInfo?.proxy || null, () =>
           (handleChatCore as any)({
-            body: {
-              ...body,
-              model: `${provider}/${model}`,
-              ...(correlationId ? { _omnirouteCorrelationId: correlationId } : {}),
-            },
+            body: { ...body, model: `${provider}/${model}` },
             modelInfo: { provider, model, extendedContext, apiFormat: modelApiFormat },
             credentials: refreshedCredentials,
             log: handlerLog,
