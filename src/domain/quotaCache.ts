@@ -24,10 +24,7 @@ import {
 } from "@/lib/db/quotaSnapshots";
 import { recordProviderQuotaResetEventIfChanged } from "@/lib/db/quotaResetEvents";
 import { getCodexQuotaWindowFilterForModel } from "@omniroute/open-sse/config/codexQuotaScopes.ts";
-import {
-  getAntigravityQuotaFamily,
-  getQuotaScopedModelForProvider,
-} from "@omniroute/open-sse/services/antigravityQuotaFamily.ts";
+import { getQuotaScopedModelForProvider } from "@omniroute/open-sse/services/antigravityQuotaFamily.ts";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -120,29 +117,6 @@ function isAntigravityProvider(provider: string | null | undefined): boolean {
   return provider === "antigravity" || provider === "agy";
 }
 
-function antigravityWindowMatchesFamily(
-  windowName: string,
-  family: ReturnType<typeof getAntigravityQuotaFamily>,
-  requestedModel: string | null | undefined
-): boolean {
-  const normalizedWindow = normalizeWindowKey(windowName);
-  if (!normalizedWindow) return false;
-
-  if (family === "gemini") return normalizedWindow.includes("gemini");
-  if (family === "claude") {
-    return (
-      normalizedWindow.includes("claude") ||
-      normalizedWindow.includes("cloud") ||
-      normalizedWindow.includes("anthropic")
-    );
-  }
-
-  const normalizedModel = normalizeWindowKey(
-    String(requestedModel || "").replace(/^antigravity\//i, "")
-  );
-  return Boolean(normalizedModel && normalizedWindow.includes(normalizedModel));
-}
-
 function isReportedPositiveQuota(rawQuota: unknown, quota: QuotaInfo): boolean {
   if (!rawQuota || typeof rawQuota !== "object") return quota.remainingPercentage > 0;
   const raw = rawQuota as Record<string, unknown>;
@@ -207,10 +181,19 @@ function getAntigravityScopedQuotaWindows(
   requestedModel: string | null
 ): string[] {
   if (!requestedModel) return [];
-  const family = getAntigravityQuotaFamily(requestedModel);
-  return Object.keys(quotas).filter((windowName) =>
-    antigravityWindowMatchesFamily(windowName, family, requestedModel)
+
+  const normalizedRequestedModel = normalizeWindowKey(
+    requestedModel.replace(/^antigravity\//i, "")
   );
+  if (!normalizedRequestedModel) return [];
+
+  return Object.keys(quotas).filter((windowName) => {
+    const normalizedWindow = normalizeWindowKey(windowName);
+    return (
+      normalizedWindow === normalizedRequestedModel ||
+      normalizedWindow.endsWith(` ${normalizedRequestedModel}`)
+    );
+  });
 }
 
 function resolveQuotaWindow(
