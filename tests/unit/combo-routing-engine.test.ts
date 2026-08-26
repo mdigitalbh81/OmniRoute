@@ -34,6 +34,8 @@ const { acquire: acquireSemaphore, resetAll: resetAllSemaphores } =
   await import("../../open-sse/services/rateLimitSemaphore.ts");
 const { _resetAllDecks } = await import("../../src/shared/utils/shuffleDeck.ts");
 const { _setSecureRandomFloatSource } = await import("../../src/shared/utils/secureRandom.ts");
+const { clearAllModelLockouts, recordModelLockoutFailure } =
+  await import("../../open-sse/services/accountFallback.ts");
 
 function createLog() {
   const entries: any[] = [];
@@ -150,6 +152,7 @@ test.beforeEach(async () => {
   resetAllCircuitBreakers();
   resetAllSemaphores();
   _resetAllDecks();
+  clearAllModelLockouts();
   clearSessions();
   await resetStorage();
 });
@@ -160,6 +163,7 @@ test.after(async () => {
   resetAllCircuitBreakers();
   resetAllSemaphores();
   _resetAllDecks();
+  clearAllModelLockouts();
   clearModelsDevCapabilities();
   settingsDb.clearAllLKGP();
   if (ORIGINAL_DATA_DIR === undefined) {
@@ -168,6 +172,86 @@ test.after(async () => {
     process.env.DATA_DIR = ORIGINAL_DATA_DIR;
   }
   await cleanupTestDataDir();
+});
+
+test("handleComboChat reaches Antigravity Gemini after Claude family lockouts on all accounts", async () => {
+  const accounts = await Promise.all(
+    ["a", "b", "c"].map((suffix) =>
+      providersDb.createProviderConnection({
+        provider: "antigravity",
+        authType: "oauth",
+        name: `ag-combo-${suffix}`,
+        accessToken: `ag-combo-${suffix}-access`,
+        refreshToken: `ag-combo-${suffix}-refresh`,
+      })
+    )
+  );
+  for (const account of accounts) {
+    recordModelLockoutFailure(
+      "antigravity",
+      account.id,
+      "claude-opus-4-6-thinking",
+      "quota_exhausted",
+      429,
+      0,
+      null,
+      { exactCooldownMs: 24 * 60 * 60 * 1000 }
+    );
+  }
+
+  const calls: string[] = [];
+  const result = await handleComboChat({
+    body: {},
+    combo: {
+      name: "ag-claude-gemini-codex",
+      strategy: "fill-first",
+      models: [
+        "antigravity/claude-opus-4-6-thinking",
+        "antigravity/gemini-3.5-flash-high",
+        "codex/gpt-5.5-high",
+      ],
+      config: { maxRetries: 0, retryDelayMs: 0, fallbackDelayMs: 0 },
+    },
+    handleSingleModel: async (_body: unknown, modelStr: string) => {
+      calls.push(modelStr);
+      return okResponse();
+    },
+    isModelAvailable: async (
+      _modelStr: string,
+      target: { provider?: string; modelStr?: string; connectionId?: string } | null | undefined
+    ) => {
+      const provider = target?.provider;
+      const rawModel = String(target?.modelStr || "")
+        .split("/")
+        .slice(1)
+        .join("/");
+      if (provider && rawModel) {
+        const fallbackMod = await import("../../open-sse/services/accountFallback.ts");
+        if (target?.connectionId) {
+          return !fallbackMod.isModelLocked(provider, target.connectionId, rawModel);
+        }
+        const { getProviderConnections } = await import("../../src/lib/db/providers.ts");
+        const connections = await getProviderConnections({ provider, isActive: true });
+        if (connections.length > 0) {
+          const allLocked = connections.every((c) =>
+            fallbackMod.isModelLocked(provider, c.id, rawModel)
+          );
+          return !allLocked;
+        }
+      }
+      return true;
+    },
+    log: createLog(),
+    settings: null,
+    allCombos: null,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(calls[0], "antigravity/gemini-3.5-flash-high");
+  assert.ok(
+    !calls.includes("codex/gpt-5.5-high"),
+    "Codex should not be reached while Gemini works"
+  );
 });
 
 test("getComboFromData and getComboModelsFromData resolve combos from array and object containers", () => {

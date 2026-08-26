@@ -321,6 +321,9 @@ export async function parseUpstreamError(response: Response, provider: string | 
       message = clinepassEnvError
         ? clinepassEnvError.message
         : json.error?.message || json.message || json.error || text;
+      if (typeof json.retryAfterMs === "number" && Number.isFinite(json.retryAfterMs)) {
+        retryAfterMs = json.retryAfterMs;
+      }
       errorCode = json.error?.code || json.code;
       errorType = json.error?.type || json.type;
     } catch {

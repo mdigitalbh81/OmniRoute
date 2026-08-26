@@ -42,15 +42,12 @@ export function getQuotaScopedModelForProvider(
   model: string | null | undefined
 ): string | null {
   if (!model) return null;
-  if (provider !== ANTIGRAVITY_PROVIDER_ID) return model;
-  const family = getAntigravityQuotaFamily(model);
-  return family === "other" ? model : `family:${family}`;
+  return model;
 }
 
 export function getQuotaScopeLabelForProvider(
   provider: string | null | undefined,
   model: string | null | undefined
 ): string {
-  if (provider !== ANTIGRAVITY_PROVIDER_ID) return "model";
-  return getAntigravityQuotaFamily(model) === "other" ? "model" : "family";
+  return "model";
 }

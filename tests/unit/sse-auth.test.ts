@@ -1333,33 +1333,116 @@ test("Antigravity markAccountUnavailable scopes Claude 429 without poisoning Gem
   assert.equal(allowedGemini.connectionId, connection.id);
 });
 
-test("Antigravity Gemini 0% quota blocks Gemini without poisoning Claude", async () => {
+test("Antigravity Claude full-quota 429 preserves 24h Retry-After as exact model lockout", async () => {
   fallback.clearAllModelLockouts();
   const connection = await seedConnection("antigravity", {
     authType: "oauth",
-    name: "antigravity-gemini-zero-claude-full",
-    accessToken: "antigravity-gemini-zero-access",
-    refreshToken: "antigravity-gemini-zero-refresh",
+    name: "antigravity-claude-24h-scoped",
+    accessToken: "antigravity-claude-24h-access",
+    refreshToken: "antigravity-claude-24h-refresh",
+  });
+  const retryAfterMs = 24 * 60 * 60 * 1000;
+
+  const result = await auth.markAccountUnavailable(
+    connection.id,
+    429,
+    "You have exhausted your capacity on this model.",
+    "antigravity",
+    "claude-opus-4-6-thinking",
+    null,
+    { upstreamRetryAfterMs: retryAfterMs }
+  );
+  await flushWrites();
+  const updated = await providersDb.getProviderConnectionById(connection.id);
+  const lockout = fallback.getModelLockoutInfo(
+    "antigravity",
+    connection.id,
+    "claude-opus-4-6-thinking"
+  );
+
+  assert.equal(result.shouldFallback, true);
+  assert.equal(updated.rateLimitedUntil, undefined);
+  assert.ok(lockout, "Opus lockout should be recorded");
+  assert.ok(
+    lockout.remainingMs > retryAfterMs - 15_000 && lockout.remainingMs <= retryAfterMs,
+    `expected ~24h model lockout, got ${lockout.remainingMs}`
+  );
+  assert.equal(
+    fallback.isModelLocked("antigravity", connection.id, "claude-sonnet-4-6"),
+    false,
+    "Sonnet should be available"
+  );
+  assert.equal(
+    fallback.isModelLocked("antigravity", connection.id, "gemini-3.5-flash-high"),
+    false,
+    "Gemini should be available"
+  );
+
+  const blockedOpus = await auth.getProviderCredentials(
+    "antigravity",
+    null,
+    null,
+    "claude-opus-4-6-thinking"
+  );
+  const allowedSonnet = await auth.getProviderCredentials(
+    "antigravity",
+    null,
+    null,
+    "claude-sonnet-4-6"
+  );
+  const allowedGemini = await auth.getProviderCredentials(
+    "antigravity",
+    null,
+    null,
+    "gemini-3.5-flash-high"
+  );
+
+  assert.equal(blockedOpus.allRateLimited, true);
+  assert.equal(allowedSonnet.connectionId, connection.id);
+  assert.equal(allowedGemini.connectionId, connection.id);
+});
+
+test("Antigravity Gemini 429 locks only Gemini Flash model without poisoning Claude or other Gemini", async () => {
+  fallback.clearAllModelLockouts();
+  const connection = await seedConnection("antigravity", {
+    authType: "oauth",
+    name: "antigravity-gemini-429-scoped",
+    accessToken: "antigravity-gemini-429-access",
+    refreshToken: "antigravity-gemini-429-refresh",
   });
 
-  quotaCache.setQuotaCache(connection.id, "antigravity", {
-    "gemini-3.5-flash-high": {
-      remainingPercentage: 0,
-      resetAt: futureIso(60_000),
-      fractionReported: true,
-    },
-    "claude-opus-4-6-thinking": {
-      remainingPercentage: 100,
-      resetAt: futureIso(60_000),
-      fractionReported: true,
-    },
-  });
+  const retryAfterMs = 24 * 60 * 60 * 1000;
+  await auth.markAccountUnavailable(
+    connection.id,
+    429,
+    "You have exhausted your capacity on this model.",
+    "antigravity",
+    "gemini-3.5-flash-high",
+    null,
+    { upstreamRetryAfterMs: retryAfterMs }
+  );
+  await flushWrites();
+  const updated = await providersDb.getProviderConnectionById(connection.id);
+
+  assert.equal(updated.rateLimitedUntil, undefined);
+  assert.equal(fallback.isModelLocked("antigravity", connection.id, "gemini-3.5-flash-high"), true);
+  assert.equal(fallback.isModelLocked("antigravity", connection.id, "gemini-3.5-flash-low"), false);
+  assert.equal(
+    fallback.isModelLocked("antigravity", connection.id, "claude-opus-4-6-thinking"),
+    false
+  );
 
   const blockedGemini = await auth.getProviderCredentials(
     "antigravity",
     null,
     null,
     "gemini-3.5-flash-high"
+  );
+  const allowedGeminiLow = await auth.getProviderCredentials(
+    "antigravity",
+    null,
+    null,
+    "gemini-3.5-flash-low"
   );
   const allowedClaude = await auth.getProviderCredentials(
     "antigravity",
@@ -1369,8 +1452,80 @@ test("Antigravity Gemini 0% quota blocks Gemini without poisoning Claude", async
   );
 
   assert.equal(blockedGemini.allRateLimited, true);
-  assert.equal(Number(blockedGemini.lastErrorCode), 429);
+  assert.equal(allowedGeminiLow.connectionId, connection.id);
   assert.equal(allowedClaude.connectionId, connection.id);
+});
+
+test("Antigravity legacy global cooldown is cleared via startup recovery flow", async () => {
+  fallback.clearAllModelLockouts();
+  const connection = await seedConnection("antigravity", {
+    authType: "oauth",
+    name: "antigravity-legacy-global-cooldown",
+    accessToken: "antigravity-legacy-access",
+    refreshToken: "antigravity-legacy-refresh",
+    rateLimitedUntil: String(Date.now() + 24 * 60 * 60 * 1000),
+    testStatus: "active",
+  });
+
+  // Run startup recovery flow
+  providersDb.clearStaleCrashCooldowns();
+  providersDb.clearLegacyAntigravityModelQuotaCooldowns();
+
+  await flushWrites();
+  const updated = await providersDb.getProviderConnectionById(connection.id);
+  assert.equal(updated.rateLimitedUntil, undefined);
+});
+
+test("Antigravity terminal/auth cooldown rows are preserved by the startup recovery flow", async () => {
+  fallback.clearAllModelLockouts();
+  const banned = await seedConnection("antigravity", {
+    authType: "oauth",
+    name: "antigravity-terminal-cooldown",
+    accessToken: "antigravity-terminal-access",
+    refreshToken: "antigravity-terminal-refresh",
+    rateLimitedUntil: String(Date.now() + 24 * 60 * 60 * 1000),
+    testStatus: "banned",
+    errorCode: 401,
+    lastError: "invalid_grant",
+    lastErrorType: "oauth_invalid_token",
+  });
+
+  // Run startup recovery flow
+  providersDb.clearStaleCrashCooldowns();
+  providersDb.clearLegacyAntigravityModelQuotaCooldowns();
+
+  await flushWrites();
+  const updated = await providersDb.getProviderConnectionById(banned.id);
+  assert.ok(updated.rateLimitedUntil);
+});
+
+test("retryAfterMs transportado sem concatenar JSON em error string", async () => {
+  fallback.clearAllModelLockouts();
+  const connection = await seedConnection("antigravity", {
+    authType: "oauth",
+    name: "ag-json-transport-test",
+    accessToken: "ag-json-access",
+    refreshToken: "ag-json-refresh",
+  });
+  const retryAfterMs = 5000;
+
+  await auth.markAccountUnavailable(
+    connection.id,
+    429,
+    "Rate limit error message",
+    "antigravity",
+    "claude-opus-4-6-thinking",
+    null,
+    { upstreamRetryAfterMs: retryAfterMs }
+  );
+
+  await flushWrites();
+  const updated = await providersDb.getProviderConnectionById(connection.id);
+  assert.equal(Number(updated.errorCode), 429);
+  assert.equal(updated.lastError, "Model claude-opus-4-6-thinking rate_limited");
+  assert.equal(updated.lastErrorType, "rate_limited");
+  assert.equal(updated.lastError.includes("{"), false);
+  assert.equal(updated.lastError.includes("}"), false);
 });
 
 test("Antigravity unknown Claude quota does not clear active Claude 429 cooldown", async () => {

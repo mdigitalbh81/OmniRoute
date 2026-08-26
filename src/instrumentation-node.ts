@@ -170,11 +170,13 @@ export async function registerNodejs(): Promise<void> {
   // Terminal states (banned / expired / credits_exhausted) are intentionally kept.
   // See: https://github.com/diegosouzapw/OmniRoute/issues/3625 (Part A)
   try {
-    const { clearStaleCrashCooldowns } = await import("@/lib/db/providers");
+    const { clearStaleCrashCooldowns, clearLegacyAntigravityModelQuotaCooldowns } =
+      await import("@/lib/db/providers");
     const { cleared } = clearStaleCrashCooldowns();
-    if (cleared > 0) {
+    const { cleared: clearedAntigravityLegacy } = clearLegacyAntigravityModelQuotaCooldowns();
+    if (cleared > 0 || clearedAntigravityLegacy > 0) {
       console.log(
-        `[STARTUP] Cleared ${cleared} stale transient connection cooldown(s) from prior crash (#3625)`
+        `[STARTUP] Cleared ${cleared} stale transient cooldown(s) and ${clearedAntigravityLegacy} legacy Antigravity model-quota cooldown(s)`
       );
     }
   } catch (err: unknown) {

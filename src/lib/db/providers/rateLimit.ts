@@ -100,6 +100,72 @@ export function getRateLimitedConnections(
   return rows.map((r) => ({ id: r.id, rateLimitedUntil: r.rate_limited_until }));
 }
 
+/**
+ * Clear Antigravity connection-wide cooldowns written by the former
+ * model-quota path. Safe only for active rows with no terminal/auth evidence;
+ * model/family lockouts remain in the in-memory lockout layer.
+ */
+export function clearLegacyAntigravityModelQuotaCooldowns(): { cleared: number } {
+  const db = getDbInstance() as unknown as DbLike;
+  const nowMs = Date.now();
+  const nowStr = new Date(nowMs).toISOString();
+
+  const rows = db
+    .prepare(
+      `SELECT id, is_active, test_status, rate_limited_until, error_code, last_error, last_error_type, last_error_source
+       FROM provider_connections
+       WHERE provider = \x27antigravity\x27`
+    )
+    .all() as Array<{
+    id: string;
+    is_active: number | boolean | null;
+    test_status: string | null;
+    rate_limited_until: string | number | null;
+    error_code: string | number | null;
+    last_error: string | null;
+    last_error_type: string | null;
+    last_error_source: string | null;
+  }>;
+
+  const toReset = rows.filter((row) => {
+    const active = row.is_active === 1 || row.is_active === true;
+    if (!active) return false;
+
+    const status = (row.test_status || "").trim().toLowerCase();
+    if (status !== "active" && status !== "") return false;
+
+    if (row.rate_limited_until == null) return false;
+    const rawLimit = String(row.rate_limited_until).trim();
+    const time = /^\d+(\.\d+)?$/.test(rawLimit) ? Number(rawLimit) : new Date(rawLimit).getTime();
+    if (!Number.isFinite(time) || time <= nowMs) return false;
+
+    if (row.error_code !== null && String(row.error_code).trim() !== "") return false;
+    if (row.last_error !== null && String(row.last_error).trim() !== "") return false;
+    if (row.last_error_type !== null && String(row.last_error_type).trim() !== "") return false;
+    if (row.last_error_source !== null && String(row.last_error_source).trim() !== "") return false;
+
+    return true;
+  });
+
+  if (toReset.length === 0) return { cleared: 0 };
+
+  const stmt = db.prepare(
+    `UPDATE provider_connections SET
+       rate_limited_until = NULL,
+       backoff_level      = 0,
+       updated_at         = ?
+     WHERE id = ?`
+  );
+
+  for (const row of toReset) {
+    stmt.run(nowStr, row.id);
+  }
+
+  invalidateDbCache("connections");
+
+  return { cleared: toReset.length };
+}
+
 // ──────────────── T13: Stale Quota Display Fix ─────────────────────────────
 // Codex/Claude quotas display stale cumulative usage after the window resets.
 // By comparing resetAt timestamp to now(), we can show 0 when window has passed.
@@ -149,28 +215,28 @@ export function clearStaleCrashCooldowns(): { cleared: number } {
   const db = getDbInstance() as unknown as DbLike;
   const now = new Date().toISOString();
 
-  // Fetch all connections that have a rate_limited_until set and are NOT in
-  // a terminal state.  We do the terminal-status filter in JS to reuse the
-  // canonical `TERMINAL_STATUSES` set rather than duplicating the list in SQL.
-  const TERMINAL_STATUSES = new Set(["banned", "expired", "credits_exhausted"]);
-
   const rows = db
     .prepare(
-      `SELECT id, test_status FROM provider_connections WHERE rate_limited_until IS NOT NULL`
+      `SELECT id, test_status, error_code, last_error_type, last_error_source
+       FROM provider_connections
+       WHERE rate_limited_until IS NOT NULL`
     )
-    .all() as Array<{ id: string; test_status: string | null }>;
+    .all() as Array<{
+    id: string;
+    test_status: string | null;
+    error_code: string | number | null;
+    last_error_type: string | null;
+    last_error_source: string | null;
+  }>;
 
-  const toReset = rows.filter((r) => {
-    const status = (r.test_status || "").trim().toLowerCase();
-    return !TERMINAL_STATUSES.has(status);
-  });
+  const toReset = rows.filter((r) => !isTerminalOrAuthConnection(r));
 
   if (toReset.length === 0) return { cleared: 0 };
 
   const stmt = db.prepare(
     `UPDATE provider_connections SET
        rate_limited_until = NULL,
-       test_status        = 'active',
+       test_status        = \x27active\x27,
        backoff_level      = 0,
        last_error         = NULL,
        last_error_at      = NULL,
@@ -196,3 +262,46 @@ export function clearStaleCrashCooldowns(): { cleared: number } {
 // server-only DB module (better-sqlite3/ioredis) into the browser bundle.
 // Re-exported here for existing server-side callers and the db/providers barrel.
 export { formatResetCountdown } from "@/shared/utils/formatting";
+
+function isTerminalOrAuthConnection(row: {
+  test_status?: string | null;
+  error_code?: string | number | null;
+  last_error_type?: string | null;
+  last_error_source?: string | null;
+}): boolean {
+  const status = (row.test_status || "").trim().toLowerCase();
+  if (
+    status === "banned" ||
+    status === "expired" ||
+    status === "credits_exhausted" ||
+    status === "deactivated" ||
+    status === "unrecoverable_refresh_error"
+  ) {
+    return true;
+  }
+
+  const code = row.error_code == null ? "" : String(row.error_code).trim().toLowerCase();
+  if (code === "401" || code === "403") {
+    return true;
+  }
+
+  const errType = (row.last_error_type || "").trim().toLowerCase();
+  if (
+    errType === "auth_error" ||
+    errType === "unauthorized" ||
+    errType === "forbidden" ||
+    errType === "oauth_invalid_token" ||
+    errType === "banned" ||
+    errType === "deactivated" ||
+    errType === "account_deactivated"
+  ) {
+    return true;
+  }
+
+  const errSource = (row.last_error_source || "").trim().toLowerCase();
+  if (errSource && /oauth|auth|credential/i.test(errSource)) {
+    return true;
+  }
+
+  return false;
+}

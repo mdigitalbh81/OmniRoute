@@ -1,12 +1,8 @@
 /**
  * TDD regression tests for #3707:
  * 1. `decide429("quota_exhausted")` → `full_quota_exhausted` verdict (engine contract)
- * 2. `markConnectionQuotaExhausted` persists the 24h cooldown in the DB so that
- *    cross-request and post-restart routing skips exhausted connections.
- *
- * Bug: before the fix the executor never called `setConnectionRateLimitUntil`,
- * so `isConnectionRateLimited` always returned false for AG connections that
- * had their daily quota exhausted — learned state was lost on restart.
+ * 2. `markConnectionQuotaExhausted` does not persist model-scoped quota cooldowns
+ *    as connection-wide rate_limited_until rows when the requested model is known.
  */
 
 import { test } from "node:test";
@@ -72,13 +68,13 @@ test("classify429: standard Gemini rate limit 'resource has been exhausted' -> r
 
 // ── DB persistence (the missing wire — Bug #2) ───────────────────────────────
 
-test("markConnectionQuotaExhausted persists 24h cooldown; isConnectionRateLimited returns true", async () => {
+test("markConnectionQuotaExhausted without a requested model keeps the legacy connection-wide guard", async () => {
   const conn = await providersDb.createProviderConnection({
     provider: "antigravity",
     authType: "oauth",
     name: "AG Test Quota",
   });
-  const connId = (conn as any).id;
+  const connId = (conn as { id: string }).id;
 
   assert.equal(
     providersDb.isConnectionRateLimited(connId),
@@ -95,13 +91,32 @@ test("markConnectionQuotaExhausted persists 24h cooldown; isConnectionRateLimite
   );
 });
 
+test("markConnectionQuotaExhausted skips connection-wide cooldown when requestedModel is known", async () => {
+  const conn = await providersDb.createProviderConnection({
+    provider: "antigravity",
+    authType: "oauth",
+    name: "AG Test Model Scoped Quota",
+  });
+  const connId = (conn as { id: string }).id;
+
+  markConnectionQuotaExhausted(connId, FULL_QUOTA_COOLDOWN_MS, {
+    requestedModel: "claude-opus-4-6-thinking",
+  });
+
+  assert.equal(
+    providersDb.isConnectionRateLimited(connId),
+    false,
+    "model quota exhaustion must not poison the whole Antigravity connection"
+  );
+});
+
 test("markConnectionQuotaExhausted: expired cooldown does not block the connection", async () => {
   const conn = await providersDb.createProviderConnection({
     provider: "antigravity",
     authType: "oauth",
     name: "AG Test Expired",
   });
-  const connId = (conn as any).id;
+  const connId = (conn as { id: string }).id;
 
   // Set cooldown in the past — simulates expired cooldown
   providersDb.setConnectionRateLimitUntil(connId, Date.now() - 1);

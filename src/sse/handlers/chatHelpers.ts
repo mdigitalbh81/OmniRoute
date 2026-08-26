@@ -483,7 +483,7 @@ export async function executeChatWithBreaker({
                 provider,
                 model,
                 providerProfile,
-                { isCombo }
+                { isCombo, upstreamRetryAfterMs: failure?.retryAfterMs }
               );
             },
           })

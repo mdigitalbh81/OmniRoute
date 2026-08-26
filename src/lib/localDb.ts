@@ -34,6 +34,7 @@ export {
 
   // T05 startup recovery: clear stale transient cooldowns left by a prior crash
   clearStaleCrashCooldowns,
+  clearLegacyAntigravityModelQuotaCooldowns,
 
   // T13: Stale quota display fix (zero out usage after window resets)
   getEffectiveQuotaUsage,

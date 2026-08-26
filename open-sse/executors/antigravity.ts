@@ -305,7 +305,12 @@ function markCreditsExhausted(accountId: string): void {
  * cross-request and post-restart routing skips this connection until the
  * cooldown expires. Exported for unit testing. @internal
  */
-export function markConnectionQuotaExhausted(connectionId: string, retryAfterMs: number): void {
+export function markConnectionQuotaExhausted(
+  connectionId: string,
+  retryAfterMs: number,
+  options: { requestedModel?: string | null } = {}
+): void {
+  if (options.requestedModel) return;
   try {
     setConnectionRateLimitUntil(connectionId, Date.now() + retryAfterMs);
   } catch {
@@ -1318,14 +1323,13 @@ export class AntigravityExecutor extends BaseExecutor {
               // 2. Classify 429 (pass header-parsed retry hint as fallback
               //    signal — multi-hour Retry-After upgrades rate_limited to
               //    quota_exhausted so the GOOGLE_ONE_AI credits retry fires).
-              const effectiveRetryHintMs = retryMs ?? parsedRetryMs ?? null;
               const category = classify429(errorMessage);
 
               // 3. Decide final retry time BEFORE the credits retry so that
               //    full_quota_exhausted can skip the credits attempt entirely
               //    (avoids ~41s hold on an already-exhausted account) and
-              //    persist the cooldown to DB for post-restart routing.
-              const decision: Decision = decide429(category, parsedRetryMs);
+              //    surface the exact reset hint to the auth/model-lockout layer.
+              const decision: Decision = decide429(category, retryMs ?? parsedRetryMs);
               retryMs = decision.retryAfterMs;
               log?.debug?.(
                 "AG_429",
@@ -1333,7 +1337,7 @@ export class AntigravityExecutor extends BaseExecutor {
               );
 
               if (decision.kind === "full_quota_exhausted" && retryMs) {
-                markConnectionQuotaExhausted(accountId, retryMs);
+                markConnectionQuotaExhausted(accountId, retryMs, { requestedModel: model });
               }
 
               const creditsAlreadyInjected =

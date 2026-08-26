@@ -1482,8 +1482,7 @@ export async function getProviderCredentials(
       { fallbackStrategy?: string; stickyRoundRobinLimit?: number }
     >;
     const providerOverride = providerStrategyOverrides[resolvedId] || {};
-    const strategy =
-      providerOverride.fallbackStrategy || settings.fallbackStrategy || "fill-first";
+    const strategy = providerOverride.fallbackStrategy || settings.fallbackStrategy || "fill-first";
 
     let connection;
     const affinityConnection = await selectSessionAffinityConnection(
@@ -1887,6 +1886,7 @@ export async function markAccountUnavailable(
     persistUnavailableState?: boolean;
     /** Caller is the combo engine — it records its own model-level lockouts. */
     isCombo?: boolean;
+    upstreamRetryAfterMs?: number | null;
   } = {}
 ) {
   const currentMutex = markMutexes.get(connectionId) || Promise.resolve();
@@ -2046,9 +2046,11 @@ export async function markAccountUnavailable(
         {
           ...modelLockoutOptions,
           exactCooldownMs:
-            fallbackResult.usedUpstreamRetryHint === true
-              ? fallbackResult.cooldownMs
-              : (fallbackResult.quotaResetHintMs ?? null),
+            options.upstreamRetryAfterMs != null && options.upstreamRetryAfterMs > 0
+              ? options.upstreamRetryAfterMs
+              : fallbackResult.usedUpstreamRetryHint === true
+                ? fallbackResult.cooldownMs
+                : (fallbackResult.quotaResetHintMs ?? null),
           maxCooldownMs: mlSettings.maxCooldownMs,
         }
       );
@@ -2079,7 +2081,13 @@ export async function markAccountUnavailable(
         status,
         effectiveProviderProfile?.baseCooldownMs ?? COOLDOWN_MS.serviceUnavailable,
         effectiveProviderProfile,
-        { maxCooldownMs: mlSettings.maxCooldownMs }
+        {
+          maxCooldownMs: mlSettings.maxCooldownMs,
+          exactCooldownMs:
+            options.upstreamRetryAfterMs != null && options.upstreamRetryAfterMs > 0
+              ? options.upstreamRetryAfterMs
+              : null,
+        }
       );
       updateProviderConnection(connectionId, {
         lastErrorType: "forbidden",
@@ -2116,7 +2124,11 @@ export async function markAccountUnavailable(
         {
           ...modelLockoutOptions,
           exactCooldownMs:
-            fallbackResult.usedUpstreamRetryHint === true ? fallbackResult.cooldownMs : null,
+            options.upstreamRetryAfterMs != null && options.upstreamRetryAfterMs > 0
+              ? options.upstreamRetryAfterMs
+              : fallbackResult.usedUpstreamRetryHint === true
+                ? fallbackResult.cooldownMs
+                : null,
           maxCooldownMs: mlSettings.maxCooldownMs,
         }
       );
@@ -2151,7 +2163,13 @@ export async function markAccountUnavailable(
           ? (effectiveProviderProfile?.baseCooldownMs ?? COOLDOWN_MS.notFoundLocal)
           : COOLDOWN_MS.notFoundLocal,
         effectiveProviderProfile,
-        { maxCooldownMs: mlSettings.maxCooldownMs }
+        {
+          maxCooldownMs: mlSettings.maxCooldownMs,
+          exactCooldownMs:
+            options.upstreamRetryAfterMs != null && options.upstreamRetryAfterMs > 0
+              ? options.upstreamRetryAfterMs
+              : null,
+        }
       );
       updateProviderConnection(connectionId, {
         lastErrorType: "not_found",

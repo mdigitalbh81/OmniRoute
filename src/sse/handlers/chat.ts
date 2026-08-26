@@ -1497,7 +1497,7 @@ async function handleSingleModelChat(
           provider,
           model,
           providerProfile,
-          { isCombo }
+          { isCombo, upstreamRetryAfterMs: result.retryAfterMs }
         );
 
         if (shouldFallback && !hasForcedConnection) {
@@ -1547,7 +1547,7 @@ async function handleSingleModelChat(
           provider,
           model,
           providerProfile,
-          { isCombo }
+          { isCombo, upstreamRetryAfterMs: result.retryAfterMs }
         );
 
         if (shouldFallback && !hasForcedConnection) {
@@ -1756,6 +1756,7 @@ async function handleSingleModelChat(
                 (failureKind === "rate_limit" || failureKind === "transient")
               ),
               isCombo,
+              upstreamRetryAfterMs: result.retryAfterMs,
             }
           );
 

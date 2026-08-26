@@ -11,6 +11,8 @@ import {
 } from "../../open-sse/services/antigravityVersion.ts";
 import { clearAntigravityProjectCache } from "../../open-sse/services/antigravityProjectBootstrap.ts";
 import { runWithCapture } from "../../open-sse/utils/providerRequestLogging.ts";
+const core = await import("../../src/lib/db/core.ts");
+const providersDb = await import("../../src/lib/db/providers.ts");
 
 type AntigravityTransformResult = Exclude<
   Awaited<ReturnType<AntigravityExecutor["transformRequest"]>>,
@@ -718,6 +720,56 @@ test("AntigravityExecutor.execute embeds retryAfterMs when the upstream asks for
 
     assert.equal(result.response.status, 429);
     assert.equal(payload.retryAfterMs, 7_200_000);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("AntigravityExecutor.execute does not persist model quota 429 as connection-wide cooldown", async () => {
+  const executor = new AntigravityExecutor();
+  const originalFetch = globalThis.fetch;
+  seedAntigravityVersionCache("2026.04.17-test");
+  core.resetDbInstance();
+
+  const connection = await providersDb.createProviderConnection({
+    provider: "antigravity",
+    authType: "oauth",
+    name: "ag-executor-model-quota",
+  });
+
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        error: {
+          message:
+            "You have exhausted your capacity on this model. Your quota will reset after 24h.",
+        },
+      }),
+      {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+
+  try {
+    const result = await executor.execute({
+      model: "antigravity/claude-opus-4-6-thinking",
+      body: { request: { contents: [] } },
+      stream: true,
+      credentials: {
+        accessToken: "token",
+        connectionId: connection.id,
+        projectId: "project-1",
+      },
+      log: { debug() {}, warn() {} },
+    });
+    const payload = (await result.response.json()) as ErrorPayload;
+    const updated = await providersDb.getProviderConnectionById(connection.id);
+
+    assert.equal(result.response.status, 429);
+    assert.equal(payload.retryAfterMs, 24 * 60 * 60 * 1000);
+    assert.equal(updated?.rateLimitedUntil, undefined);
+    assert.equal(providersDb.isConnectionRateLimited(connection.id), false);
   } finally {
     globalThis.fetch = originalFetch;
   }
