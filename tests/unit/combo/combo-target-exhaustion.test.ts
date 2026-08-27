@@ -363,3 +363,39 @@ test("gemini 524 DOES exhaust connection (cloudflare timeout)", () => {
   });
   assert.equal(s.exhaustedConnections.has("gemini:gemini-key-abc"), true);
 });
+
+test("isModelScoped true does NOT exhaust connection", () => {
+  const s = sets();
+  const exhausted = applyComboTargetExhaustion(
+    target({ provider: "gemini", connectionId: "gemini-conn-1" }),
+    {
+      ...baseOpts,
+      result: { status: 429, isModelScoped: true },
+      fallbackResult: {},
+      errorText: "Quota Limit reached",
+      rawModel: "gemini-2.0-flash",
+      sets: s,
+    }
+  );
+  assert.equal(exhausted, false);
+  assert.equal(s.exhaustedConnections.size, 0);
+  assert.equal(s.exhaustedProviders.size, 0);
+});
+
+test("isModelScoped true does NOT exhaust provider even on 502", () => {
+  const s = sets();
+  const exhausted = applyComboTargetExhaustion(
+    target({ provider: "gemini", connectionId: "gemini-conn-1" }),
+    {
+      ...baseOpts,
+      result: { status: 502, isModelScoped: true },
+      fallbackResult: {},
+      errorText: "Bad Gateway",
+      rawModel: "gemini-2.0-flash",
+      sets: s,
+    }
+  );
+  assert.equal(exhausted, false);
+  assert.equal(s.exhaustedConnections.size, 0);
+  assert.equal(s.exhaustedProviders.size, 0);
+});

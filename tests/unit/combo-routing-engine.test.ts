@@ -3290,3 +3290,89 @@ test("#3587 round-robin keeps near-cap reasoning max_tokens unchanged", async ()
   assert.equal(seen[0].maxTokens, 64000, "first reasoning model should keep max_tokens");
   assert.equal(seen[1].maxTokens, 64000, "second reasoning model should keep max_tokens");
 });
+
+test("handleComboChat with Opus 429 fallback to Gemini (model-scoped)", async () => {
+  const calls: string[] = [];
+
+  const result = await handleComboChat({
+    body: {},
+    combo: {
+      name: "ag-opus-flash-codex",
+      strategy: "fill-first",
+      models: [
+        "antigravity/claude-opus-4-6-thinking",
+        "antigravity/gemini-3.5-flash-high",
+        "codex/gpt-5.5-high",
+      ],
+      config: { maxRetries: 0, retryDelayMs: 0, fallbackDelayMs: 0 },
+    },
+    handleSingleModel: async (_body: unknown, modelStr: string) => {
+      calls.push(modelStr);
+      if (modelStr === "antigravity/claude-opus-4-6-thinking") {
+        const res = new Response(
+          JSON.stringify({ error: { message: "You have exhausted your capacity on this model." } }),
+          { status: 429, headers: { "Content-Type": "application/json" } }
+        );
+        Object.assign(res, { isModelScoped: true });
+        return res;
+      }
+      return okResponse();
+    },
+    isModelAvailable: async () => true,
+    log: createLog(),
+    settings: null,
+    allCombos: null,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0], "antigravity/claude-opus-4-6-thinking");
+  assert.equal(calls[1], "antigravity/gemini-3.5-flash-high");
+  assert.ok(
+    !calls.includes("codex/gpt-5.5-high"),
+    "Codex should not be called when Gemini succeeds"
+  );
+});
+
+test("handleComboChat with Opus 502 skips same-provider Gemini (connection-scoped)", async () => {
+  const calls: string[] = [];
+
+  const result = await handleComboChat({
+    body: {},
+    combo: {
+      name: "ag-opus-flash-codex-err",
+      strategy: "fill-first",
+      models: [
+        "antigravity/claude-opus-4-6-thinking",
+        "antigravity/gemini-3.5-flash-high",
+        "codex/gpt-5.5-high",
+      ],
+      config: { maxRetries: 0, retryDelayMs: 0, fallbackDelayMs: 0 },
+    },
+    handleSingleModel: async (_body: unknown, modelStr: string) => {
+      calls.push(modelStr);
+      if (modelStr === "antigravity/claude-opus-4-6-thinking") {
+        const res = new Response(JSON.stringify({ error: { message: "Bad Gateway" } }), {
+          status: 502,
+          headers: { "Content-Type": "application/json" },
+        });
+        // isModelScoped is false/undefined
+        return res;
+      }
+      return okResponse();
+    },
+    isModelAvailable: async () => true,
+    log: createLog(),
+    settings: null,
+    allCombos: null,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0], "antigravity/claude-opus-4-6-thinking");
+  assert.equal(calls[1], "codex/gpt-5.5-high");
+  assert.ok(
+    !calls.includes("antigravity/gemini-3.5-flash-high"),
+    "Gemini should be skipped due to connection exhaustion"
+  );
+});

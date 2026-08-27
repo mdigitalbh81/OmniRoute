@@ -2022,7 +2022,7 @@ export async function markAccountUnavailable(
           "AUTH",
           `Server error for ${provider}:${model} — ${status} ${reason} (no model lockout, connection stays active for sibling models)`
         );
-        return { shouldFallback: true, cooldownMs: 0 };
+        return { shouldFallback: true, cooldownMs: 0, isModelScoped: true };
       }
 
       const quotaScope = getQuotaScopeLabelForProvider(provider, model);
@@ -2065,7 +2065,7 @@ export async function markAccountUnavailable(
         "AUTH",
         `Model-only lockout for ${provider}:${model} — ${status} ${reason} ${Math.ceil(lockout.cooldownMs / 1000)}s (failureCount=${lockout.failureCount}, connection stays active)`
       );
-      return { shouldFallback: true, cooldownMs: lockout.cooldownMs };
+      return { shouldFallback: true, cooldownMs: lockout.cooldownMs, isModelScoped: true };
     }
     const result = fallbackResult;
     const { shouldFallback, cooldownMs: rawCooldownMs, newBackoffLevel, reason } = result;
@@ -2099,7 +2099,7 @@ export async function markAccountUnavailable(
         "AUTH",
         `Mode-only lockout for ${provider}:${model} — 403 forbidden ${Math.ceil(lockout.cooldownMs / 1000)}s (connection stays active)`
       );
-      return { shouldFallback: true, cooldownMs: lockout.cooldownMs };
+      return { shouldFallback: true, cooldownMs: lockout.cooldownMs, isModelScoped: true };
     }
 
     const terminalStatus = resolveTerminalConnectionStatus(
@@ -2142,7 +2142,7 @@ export async function markAccountUnavailable(
         "AUTH",
         `Model-only lockout for ${provider}:${model} — 403 forbidden ${Math.ceil(lockout.cooldownMs / 1000)}s (per-model quota provider, connection stays active)`
       );
-      return { shouldFallback: true, cooldownMs: lockout.cooldownMs };
+      return { shouldFallback: true, cooldownMs: lockout.cooldownMs, isModelScoped: true };
     }
 
     // ── 404 model-only lockout: connection stays active ──
@@ -2181,7 +2181,7 @@ export async function markAccountUnavailable(
         "AUTH",
         `Model-only lockout for ${provider}:${model} — 404 not_found ${Math.ceil(lockout.cooldownMs / 1000)}s (failureCount=${lockout.failureCount}, connection stays active)`
       );
-      return { shouldFallback: true, cooldownMs: lockout.cooldownMs };
+      return { shouldFallback: true, cooldownMs: lockout.cooldownMs, isModelScoped: true };
     }
 
     const errorMsg = typeof errorText === "string" ? errorText.slice(0, 100) : "Provider error";
@@ -2217,7 +2217,7 @@ export async function markAccountUnavailable(
         console.error(`❌ ${provider} [${status}] (${scope}): ${errorMsg}`);
       }
 
-      return { shouldFallback: true, cooldownMs: scopeCooldownMs };
+      return { shouldFallback: true, cooldownMs: scopeCooldownMs, isModelScoped: true };
     }
 
     const baseUpdate = {
@@ -2240,6 +2240,7 @@ export async function markAccountUnavailable(
       await updateProviderConnection(connectionId, {
         ...baseUpdate,
       });
+      return { shouldFallback: true, cooldownMs, isModelScoped: true };
     } else if (cooldownMs > 0 && !disableCooling) {
       await updateProviderConnection(connectionId, {
         ...baseUpdate,

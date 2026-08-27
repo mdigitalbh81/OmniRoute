@@ -843,6 +843,7 @@ export async function handleChat(
             providerId: target?.providerId ?? null,
             correlationId: reqId,
             modelPinned: (target as any)?.modelPinned ?? false,
+            traceLog,
           },
           target?.effectiveComboStrategy ?? combo.strategy,
           true
@@ -895,6 +896,7 @@ export async function handleChat(
             sessionAffinityKey,
             emergencyFallbackTried: true,
             forceLiveComboTest: isComboLiveTest,
+            traceLog,
           },
           combo.strategy,
           true
@@ -956,6 +958,7 @@ export async function handleChat(
       forceLiveComboTest: isComboLiveTest,
       forcedConnectionId: requestedConnectionId,
       correlationId: reqId,
+      traceLog,
     },
     null,
     false
@@ -1004,6 +1007,7 @@ async function handleSingleModelChat(
     cachedSettings?: any;
     providerId?: string | null;
     correlationId?: string | null;
+    traceLog?: (event: string, data?: Record<string, unknown>) => void;
   } = {},
   comboStrategy: string | null = null,
   isCombo: boolean = false
@@ -1220,6 +1224,7 @@ async function handleSingleModelChat(
   // re-attempt to exactly one for the whole request. Declared outside both retry
   // loops so it can never reset and loop.
   let streamEarlyEofRetries = 0;
+  let isModelScopedError = false;
 
   requestAttemptLoop: while (true) {
     const excludedConnectionIds = new Set<string>();
@@ -1313,7 +1318,9 @@ async function handleSingleModelChat(
           excludedConnectionIds.size > 0
             ? Array.from(excludedConnectionIds)[excludedConnectionIds.size - 1]
             : null;
-        return withSelectedConnectionHeader(noCredsRes, lastFailedConnectionId);
+        const res = withSelectedConnectionHeader(noCredsRes, lastFailedConnectionId);
+        (res as any).isModelScoped = isModelScopedError || credentials?.cooldownScope === "model";
+        return res;
       }
 
       const accountId = credentials.connectionId.slice(0, 8);
@@ -1486,11 +1493,13 @@ async function handleSingleModelChat(
 
         // Stream readiness timeout is an upstream stall after an HTTP response was received,
         // not an account/quota failure. Do NOT mark the account unavailable here.
-        return withSelectedConnectionHeader(result.response, credentials?.connectionId);
+        const res = withSelectedConnectionHeader(result.response, credentials?.connectionId);
+        (res as any).isModelScoped = isModelScopedError;
+        return res;
       }
 
       if (isAntigravityStreamReadinessFailure) {
-        const { shouldFallback, cooldownMs } = await markAccountUnavailable(
+        const { shouldFallback, cooldownMs, isModelScoped } = await markAccountUnavailable(
           credentials.connectionId,
           result.status || HTTP_STATUS.BAD_GATEWAY,
           result.error || result.errorCode || "Antigravity stream ended before useful content",
@@ -1499,6 +1508,9 @@ async function handleSingleModelChat(
           providerProfile,
           { isCombo, upstreamRetryAfterMs: result.retryAfterMs }
         );
+        if (isModelScoped) {
+          isModelScopedError = true;
+        }
 
         if (shouldFallback && !hasForcedConnection) {
           log.warn(
@@ -1530,7 +1542,9 @@ async function handleSingleModelChat(
           continue;
         }
 
-        return withSelectedConnectionHeader(result.response, credentials?.connectionId);
+        const res = withSelectedConnectionHeader(result.response, credentials?.connectionId);
+        (res as any).isModelScoped = isModelScopedError;
+        return res;
       }
 
       const isAntigravityPreResponseTimeout =
@@ -1540,7 +1554,7 @@ async function handleSingleModelChat(
           result.errorCode === ANTIGRAVITY_PRE_RESPONSE_TIMEOUT_CODE);
 
       if (isAntigravityPreResponseTimeout) {
-        const { shouldFallback, cooldownMs } = await markAccountUnavailable(
+        const { shouldFallback, cooldownMs, isModelScoped } = await markAccountUnavailable(
           credentials.connectionId,
           result.status,
           result.error || ANTIGRAVITY_PRE_RESPONSE_TIMEOUT_CODE,
@@ -1549,6 +1563,9 @@ async function handleSingleModelChat(
           providerProfile,
           { isCombo, upstreamRetryAfterMs: result.retryAfterMs }
         );
+        if (isModelScoped) {
+          isModelScopedError = true;
+        }
 
         if (shouldFallback && !hasForcedConnection) {
           log.warn(
@@ -1580,14 +1597,18 @@ async function handleSingleModelChat(
           continue;
         }
 
-        return withSelectedConnectionHeader(result.response, credentials?.connectionId);
+        const res = withSelectedConnectionHeader(result.response, credentials?.connectionId);
+        (res as any).isModelScoped = isModelScopedError;
+        return res;
       }
 
       if (result.errorType === "account_semaphore_capacity") {
         // Local concurrency pressure is not an upstream quota failure. Prefer another
         // account when possible; pinned combo steps fall through to combo orchestration.
         if (hasForcedConnection) {
-          return withSelectedConnectionHeader(result.response, credentials?.connectionId);
+          const res = withSelectedConnectionHeader(result.response, credentials?.connectionId);
+          (res as any).isModelScoped = isModelScopedError;
+          return res;
         }
 
         log.warn(
@@ -1709,6 +1730,7 @@ async function handleSingleModelChat(
         }
 
         dailyQuotaExhausted = true;
+        isModelScopedError = true;
       }
 
       // 7. Mark account as quota-exhausted only for explicit long-window quota signals.
@@ -1721,6 +1743,7 @@ async function handleSingleModelChat(
           shouldMarkAccountExhaustedFrom429(provider, model, passthroughModels, failureKind)
         ) {
           markAccountExhaustedFrom429(credentials.connectionId, provider, model);
+          isModelScopedError = true;
         }
       }
 
@@ -1740,8 +1763,8 @@ async function handleSingleModelChat(
         (is401 && hasExtraKeys) ||
         isSelfInflictedUpstreamTimeout(result.status, result.errorType, provider);
 
-      const { shouldFallback, cooldownMs } = skipConnectionDisable
-        ? { shouldFallback: false, cooldownMs: 0 }
+      const { shouldFallback, cooldownMs, isModelScoped } = skipConnectionDisable
+        ? { shouldFallback: false, cooldownMs: 0, isModelScoped: false }
         : await markAccountUnavailable(
             credentials.connectionId,
             result.status,
@@ -1759,13 +1782,16 @@ async function handleSingleModelChat(
               upstreamRetryAfterMs: result.retryAfterMs,
             }
           );
+      if (isModelScoped) {
+        isModelScopedError = true;
+      }
 
       if (shouldFallback) {
         if (Number.isFinite(cooldownMs) && cooldownMs > 0) {
           lastCooldownMs = cooldownMs;
           requestRetryLastCooldownMs = cooldownMs;
         }
-        traceLog("accountFallback", {
+        runtimeOptions.traceLog?.("accountFallback", {
           accountFallback: true,
           provider,
           connectionId: credentials.connectionId,
@@ -1807,7 +1833,9 @@ async function handleSingleModelChat(
         breaker._onFailure();
       }
 
-      return withSelectedConnectionHeader(result.response, credentials?.connectionId);
+      const res = withSelectedConnectionHeader(result.response, credentials?.connectionId);
+      (res as any).isModelScoped = isModelScopedError;
+      return res;
     }
   }
 }

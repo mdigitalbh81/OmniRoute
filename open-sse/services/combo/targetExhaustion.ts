@@ -45,7 +45,7 @@ export type ComboExhaustionSets = {
 };
 
 export type ApplyComboTargetExhaustionOptions = {
-  result: { status: number; headers?: Headers | null };
+  result: { status: number; headers?: Headers | null; isModelScoped?: boolean };
   fallbackResult: Parameters<typeof isProviderExhaustedReason>[0];
   errorText: string;
   rawModel: string;
@@ -90,6 +90,7 @@ export function applyComboTargetExhaustion(
   const providerExhausted =
     Boolean(provider && provider !== "unknown") &&
     !hasPerModelQuota(provider, rawModel) &&
+    result.isModelScoped !== true &&
     (isProviderExhaustedReason(fallbackResult) ||
       classifyErrorText(structuredError?.code || errorText) === RateLimitReason.QUOTA_EXHAUSTED ||
       allAccountsRateLimited);
@@ -128,6 +129,7 @@ function markConnectionLevelExhaustion(
   if (
     !provider ||
     provider === "unknown" ||
+    result.isModelScoped === true ||
     !CONNECTION_LEVEL_ERROR_STATUSES.includes(result.status) ||
     isProviderCircuitOpenResult(result, errorText) ||
     // #5085: empty-content 502 is a healthy connection returning no body — model-level, not
