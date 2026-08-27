@@ -65,6 +65,17 @@ export const ANTIGRAVITY_PUBLIC_MODELS = Object.freeze([
     supportsVision: true,
     toolCalling: true,
   },
+  // Gemini 3.7 Flash — backported from release/v3.8.50 (ceced688).
+  // Only the High tier is added; 3.6 is retired upstream for Antigravity/AGY.
+  {
+    id: "gemini-3.7-flash-high",
+    name: "Gemini 3.7 Flash (High)",
+    contextLength: 1048576,
+    maxOutputTokens: 65536,
+    supportsReasoning: true,
+    supportsVision: true,
+    toolCalling: true,
+  },
   {
     id: "gemini-3-pro-preview",
     name: "Gemini 3.1 Pro",
@@ -162,6 +173,8 @@ export const ANTIGRAVITY_MODEL_ALIASES = Object.freeze({
   "gemini-3.5-flash-low": "gemini-3.5-flash-extra-low",
   "gemini-3.5-flash-medium": "gemini-3.5-flash-low",
   "gemini-3.5-flash-high": "gemini-3-flash-agent",
+  // Gemini 3.7 Flash High → upstream "tiered" id (backported from v3.8.50).
+  "gemini-3.7-flash-high": "gemini-3.7-flash-tiered",
   // Backward-compat: the retired flagship public id `gemini-3.5-flash-preview`
   // (Antigravity 2.0's "Gemini 3.5 Flash") is kept as a HIDDEN alias so saved
   // combos/configs keep routing — it maps to the reasoning-capable High tier
@@ -231,6 +244,7 @@ export const ANTIGRAVITY_REVERSE_MODEL_ALIASES: AntigravityModelAliasMap = Objec
   "gemini-3.5-flash-extra-low": "gemini-3.5-flash-low",
   "gemini-3-flash-agent": "gemini-3.5-flash-high",
   "gemini-3.1-pro": "gemini-3-pro-preview",
+  "gemini-3.7-flash-tiered": "gemini-3.7-flash-high",
   "gemini-3-pro-image": "gemini-3-pro-image-preview",
   "rev19-uic3-1p": "gemini-2.5-computer-use-preview-10-2025",
 });
@@ -271,6 +285,7 @@ const ANTIGRAVITY_QUOTA_BUCKET_TO_CLIENT: AntigravityModelAliasMap = Object.free
   "gemini-3.5-flash-extra-low": "gemini-3.5-flash-low",
   "gemini-3.5-flash-low": "gemini-3.5-flash-medium",
   "gemini-3-flash-agent": "gemini-3.5-flash-high",
+  "gemini-3.7-flash-tiered": "gemini-3.7-flash-high",
 });
 
 // Retired/hidden upstream preview buckets that must be dropped from client-facing usage.

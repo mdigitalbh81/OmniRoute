@@ -198,6 +198,17 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
     aliases: ["gemini-3.5-flash-high"],
   },
 
+  // ── Gemini 3.7 Flash High (backported from v3.8.50) ──────────────
+  "gemini-3.7-flash-high": {
+    maxOutputTokens: 65536,
+    contextWindow: 1048576,
+    defaultThinkingBudget: 24576,
+    thinkingBudgetCap: 24576,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
+  },
+
   // ── Claude Opus 4.5 ─────────────────────────────────────────────
   "claude-opus-4-5": {
     maxOutputTokens: 32768,
