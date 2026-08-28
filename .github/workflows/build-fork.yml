@@ -42,10 +42,12 @@ jobs:
 
       - name: Add build swap
         run: |
-          sudo fallocate -l 16G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          sudo fallocate -l 16G /mnt/omniroute-build.swap
+          sudo chmod 600 /mnt/omniroute-build.swap
+          sudo mkswap /mnt/omniroute-build.swap
+          sudo swapon /mnt/omniroute-build.swap
+          echo "=== SWAP AFTER SETUP ==="
+          swapon --show
           free -h
 
       - name: Set up Docker Buildx
