@@ -40,6 +40,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Add build swap
+        run: |
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
