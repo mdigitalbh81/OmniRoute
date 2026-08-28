@@ -227,6 +227,8 @@ export {
 import { applyComboTargetExhaustion } from "./combo/targetExhaustion.ts";
 import {
   applyNativeCodexTurnPin,
+  areAllPinnedTargetsModelScopedUnusable,
+  createPinnedModelUnavailableResponse,
   getNativeCodexTurnPin,
   pinNativeCodexTurn,
 } from "./combo/nativeCodexTurnPin.ts";
@@ -923,17 +925,41 @@ async function handleComboChatInner({
   const { stickyWeightedLimit, getWeightedStepKeyForTarget, preScreenMap } = targetResolution;
   const _sticky = targetResolution.sticky;
   let orderedTargets = targetResolution.orderedTargets;
+  const quotaCutoffResetWindowConfig = resolveResetWindowConfig(config as Record<string, unknown>);
+
   if (activeNativeTurnPin) {
-    orderedTargets = applyNativeCodexTurnPin(orderedTargets, activeNativeTurnPin);
-    if (orderedTargets.length === 0) {
-      return errorResponse(
-        409,
-        "The pinned native Codex turn target is no longer available; the turn cannot be moved to another provider"
+    const pinnedTargets = applyNativeCodexTurnPin(orderedTargets, activeNativeTurnPin);
+
+    if (pinnedTargets.length === 0) {
+      log.warn(
+        "COMBO",
+        `Native Codex turn cannot continue: pinned model ${activeNativeTurnPin.modelStr} unavailable (target not in combo); preserving turn pin and terminating turn`
       );
+      return createPinnedModelUnavailableResponse();
     }
+
+    const allPinnedUnusable = await areAllPinnedTargetsModelScopedUnusable({
+      pinnedTargets,
+      resilienceSettings,
+      quotaCutoffResetWindowConfig,
+      comboName: combo.name,
+      body: body as Record<string, unknown>,
+      log,
+      isModelAvailable,
+    });
+
+    if (allPinnedUnusable) {
+      log.warn(
+        "COMBO",
+        `Native Codex turn cannot continue: pinned model ${activeNativeTurnPin.modelStr} is unavailable (model-scoped); preserving turn pin and terminating turn`
+      );
+      return createPinnedModelUnavailableResponse();
+    }
+
+    orderedTargets = pinnedTargets;
     log.info(
       "COMBO",
-      `Native Codex turn pinned to ${activeNativeTurnPin.modelStr} connection ${activeNativeTurnPin.connectionId.slice(0, 8)}`
+      `Native Codex turn pinned to ${activeNativeTurnPin.modelStr} on connection ${activeNativeTurnPin.connectionId.slice(0, 8)}`
     );
   }
 
@@ -941,7 +967,6 @@ async function handleComboChatInner({
   // exhaustion cutoff below. The "auto" strategy already applies its own cutoff
   // via buildAutoCandidates/routableCandidates, so this only affects the other
   // 16 strategies (priority, weighted, etc.) that funnel through executeTarget.
-  const quotaCutoffResetWindowConfig = resolveResetWindowConfig(config as Record<string, unknown>);
 
   // QA P0 diagnostics: record the order in which targets were actually attempted
   // (provider/model ids only) so a terminal combo failure can report the attempt
@@ -1210,7 +1235,8 @@ async function handleComboChatInner({
         if (
           resilienceSettings.providerCooldown.enabled &&
           Boolean(provider && provider !== "unknown") &&
-          isProviderInCooldown(provider, target.connectionId ?? undefined, resilienceSettings)
+          (isProviderInCooldown(provider, target.connectionId ?? undefined, resilienceSettings) ||
+            isProviderInCooldown(provider, undefined, resilienceSettings))
         ) {
           log.info("COMBO", `Skipping ${modelStr} — provider ${provider} in global cooldown`);
           recordComboDecision(traceInvocationId, {
