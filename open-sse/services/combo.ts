@@ -228,6 +228,8 @@ export {
 import { applyComboTargetExhaustion } from "./combo/targetExhaustion.ts";
 import {
   applyNativeCodexTurnPin,
+  areAllPinnedTargetsModelScopedUnusable,
+  createPinnedModelUnavailableResponse,
   getNativeCodexTurnPin,
   pinNativeCodexTurn,
 } from "./combo/nativeCodexTurnPin.ts";
@@ -927,30 +929,49 @@ async function handleComboChatInner({
   const { stickyWeightedLimit, getWeightedStepKeyForTarget, preScreenMap } = targetResolution;
   const _sticky = targetResolution.sticky;
   let orderedTargets = targetResolution.orderedTargets;
+  const quotaCutoffResetWindowConfig = resolveResetWindowConfig(config as Record<string, unknown>);
+
   if (activeNativeTurnPin) {
-    orderedTargets = applyNativeCodexTurnPin(orderedTargets, activeNativeTurnPin);
-    if (orderedTargets.length === 0) {
-      // #11371: quota-share ordering already reserved a winner slot; release it on
-      // this early exit (idempotent).
+    const pinnedTargets = applyNativeCodexTurnPin(orderedTargets, activeNativeTurnPin);
+    if (pinnedTargets.length === 0) {
+      //#11371: quota-share ordering reserved a winner slot; release on
+      //early exit (idempotent).
       targetResolution.quotaShareRelease?.();
-      return errorResponse(
-        409,
-        "The pinned native Codex turn target is no longer available; the turn cannot be moved to another provider"
+      log.warn(
+        "COMBO",
+        `Native Codex turn cannot continue: pinned model ${activeNativeTurnPin.modelStr} unavailable (target not in combo); preserving turn pin and terminating turn`
+      );
+      return createPinnedModelUnavailableResponse();
+    }
+    const allPinnedUnusable = await areAllPinnedTargetsModelScopedUnusable({
+      pinnedTargets,
+      resilienceSettings,
+      quotaCutoffResetWindowConfig,
+      comboName: combo.name,
+      body: body as Record<string, unknown>,
+      log,
+      isModelAvailable,
+    });
+    if (allPinnedUnusable) {
+      targetResolution.quotaShareRelease?.();
+      log.warn(
+        "COMBO",
+        `Native Codex turn cannot continue: pinned model ${activeNativeTurnPin.modelStr} is unavailable (model-scoped); preserving turn pin and terminating turn`
+      );
+      return createPinnedModelUnavailableResponse();
+    } else {
+      orderedTargets = pinnedTargets;
+      log.info(
+        "COMBO",
+        `Native Codex turn pinned to ${activeNativeTurnPin.modelStr} on connection ${activeNativeTurnPin.connectionId.slice(0, 8)}`
       );
     }
-    log.info(
-      "COMBO",
-      `Native Codex turn pinned to ${activeNativeTurnPin.modelStr} connection ${activeNativeTurnPin.connectionId.slice(0, 8)}`
-    );
   }
 
   // #5923 (Finding #4) — reset-window config for the shared per-target quota-
   // exhaustion cutoff below. The "auto" strategy already applies its own cutoff
   // via buildAutoCandidates/routableCandidates, so this only affects the other
   // 16 strategies (priority, weighted, etc.) that funnel through executeTarget.
-  const quotaCutoffResetWindowConfig = resolveResetWindowConfig(config as Record<string, unknown>);
-
-  // QA P0 diagnostics: record the order in which targets were actually attempted
   // (provider/model ids only) so a terminal combo failure can report the attempt
   // sequence alongside pool size + exhaustion reasons. Accumulates across set retries.
   const comboAttemptOrder: Array<{ provider: string; model: string }> = [];
@@ -1219,7 +1240,8 @@ async function handleComboChatInner({
         if (
           resilienceSettings.providerCooldown.enabled &&
           Boolean(provider && provider !== "unknown") &&
-          isProviderInCooldown(provider, target.connectionId ?? undefined, resilienceSettings)
+          (isProviderInCooldown(provider, target.connectionId ?? undefined, resilienceSettings) ||
+            isProviderInCooldown(provider, undefined, resilienceSettings))
         ) {
           log.info("COMBO", `Skipping ${modelStr} — provider ${provider} in global cooldown`);
           recordComboDecision(traceInvocationId, {
@@ -3286,24 +3308,20 @@ async function handleRoundRobinCombo({
               "COMBO-RR",
               `Maximum combo attempts (${maxGlobalAttempts}) exceeded. Terminating loop to prevent runaway requests.`
             );
-            return errorResponseWithComboDiagnostics(
-              503,
-              "Maximum combo retry limit reached",
-              {
-                poolSize: modelCount,
-                attempted: globalAttempts,
-                excluded: [
-                  ...[...exhaustedProviders].map((p) => ({ provider: p, reason: "exhausted" })),
-                  ...[...exhaustedConnections].map((c) => formatExhaustedConnectionKey(String(c))),
-                ],
-                attemptOrder: rrOutcomes.map((o) => ({
-                  provider: o.model.split("/")[0] || "unknown",
-                  model: o.model,
-                })),
-                terminalReason: "max_attempts_exceeded",
-                recovery: buildRecoveryHint("max_attempts_exceeded"),
-              }
-            );
+            return errorResponseWithComboDiagnostics(503, "Maximum combo retry limit reached", {
+              poolSize: modelCount,
+              attempted: globalAttempts,
+              excluded: [
+                ...[...exhaustedProviders].map((p) => ({ provider: p, reason: "exhausted" })),
+                ...[...exhaustedConnections].map((c) => formatExhaustedConnectionKey(String(c))),
+              ],
+              attemptOrder: rrOutcomes.map((o) => ({
+                provider: o.model.split("/")[0] || "unknown",
+                model: o.model,
+              })),
+              terminalReason: "max_attempts_exceeded",
+              recovery: buildRecoveryHint("max_attempts_exceeded"),
+            });
           }
           if (retry > 0) {
             log.info(
