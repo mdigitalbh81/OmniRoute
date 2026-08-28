@@ -2,7 +2,8 @@ name: Publish Fork Image to GHCR
 
 on:
   push:
-    branches: [fix/v3.8.50-native-codex-turn-pin]
+    branches:
+      - fix/v3.8.50-native-codex-turn-pin
   workflow_dispatch:
 
 # Least-privilege default: read-only at the top level; the build job that pushes to
@@ -13,56 +14,112 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/mdigitalbh81/omniroute
+  FINAL_TAG: ghcr.io/mdigitalbh81/omniroute:3.8.50-native-pin-test
 
 jobs:
   build:
-    name: Build and Push Fork Image
+    name: Build Docker (${{ matrix.platform }})
     if: github.repository == 'mdigitalbh81/OmniRoute'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=3.8.50-native-pin-test
-          labels: |
-            org.opencontainers.image.title=omniroute
-            org.opencontainers.image.description=Unified proxy/router fork image
-            org.opencontainers.image.url=https://github.com/mdigitalbh81/OmniRoute
-            org.opencontainers.image.source=https://github.com/mdigitalbh81/OmniRoute
-            org.opencontainers.image.licenses=MIT
-
-      - name: Build and push
+      - name: Build and push platform image by digest
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           target: runner-base
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+          tags: ${{ env.IMAGE_NAME }}
+          cache-from: type=gha,scope=docker-fork-${{ matrix.arch }}
+          cache-to: type=gha,scope=docker-fork-${{ matrix.arch }},mode=max
+          no-cache: false
+        env:
+          DOCKER_BUILDKIT_INLINE_CACHE: 1
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Publish multi-arch manifest
+    needs: build
+    if: github.repository == 'mdigitalbh81/OmniRoute'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          pattern: digests-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Create and push multi-arch manifest
+        run: |
+          set -euo pipefail
+          refs=()
+          while IFS= read -r digest_file; do
+            refs+=("${IMAGE_NAME}@sha256:$(basename "$digest_file")")
+          done < <(find /tmp/digests -type f | sort)
+          if [ "${#refs[@]}" -eq 0 ]; then
+            echo "No image digests found in /tmp/digests" >&2
+            exit 1
+          fi
+          docker buildx imagetools create -t "${FINAL_TAG}" "${refs[@]}"
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect "${FINAL_TAG}"
