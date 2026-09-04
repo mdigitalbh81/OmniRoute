@@ -230,8 +230,10 @@ export {
 };
 import { applyComboTargetExhaustion } from "./combo/targetExhaustion.ts";
 import {
+  advanceNativeCodexTurnGeneration,
   applyNativeCodexTurnPin,
   areAllPinnedTargetsModelScopedUnusable,
+  canAutoResumeNativeCodexTurn,
   createPinnedModelUnavailableResponse,
   getNativeCodexTurnPin,
   pinNativeCodexTurn,
@@ -905,9 +907,10 @@ async function handleComboChatInner({
   });
   if (runtimeUnitDispatch) return runtimeUnitDispatch;
 
-  const activeNativeTurnPin = clientManagedResponsesContext
+  let activeNativeTurnPin = clientManagedResponsesContext
     ? getNativeCodexTurnPin(body, combo.name)
     : null;
+  let isAutoResuming = false;
 
   // Route new round-robin turns to the specialized handler. A native Codex
   // continuation with an established provider/account pin must use the common
@@ -986,12 +989,42 @@ async function handleComboChatInner({
       isModelAvailable,
     });
     if (allPinnedUnusable) {
-      targetResolution.quotaShareRelease?.();
-      log.warn(
-        "COMBO",
-        `Native Codex turn cannot continue: pinned model ${activeNativeTurnPin.modelStr} is unavailable (model-scoped); preserving turn pin and terminating turn`
-      );
-      return createPinnedModelUnavailableResponse();
+      const autoResumeEligibility = await canAutoResumeNativeCodexTurn({
+        body: body as Record<string, unknown>,
+        comboName: combo.name,
+        activePin: activeNativeTurnPin,
+        allTargets: orderedTargets,
+        resilienceSettings,
+        quotaCutoffResetWindowConfig,
+        isModelAvailable,
+        log,
+      });
+
+      if (autoResumeEligibility.eligible) {
+        const selectedAlternate = autoResumeEligibility.selectedTarget;
+        log.info(
+          "COMBO",
+          `Native Codex auto-resume eligible: previous provider/model=${activeNativeTurnPin.provider}/${activeNativeTurnPin.modelStr}, previous logical turn generation=${autoResumeEligibility.previousPin.generation ?? 0}, reason=model_scoped_unavailable`
+        );
+        log.info(
+          "COMBO",
+          `Native Codex auto-resume started: previous provider/model=${activeNativeTurnPin.provider}/${activeNativeTurnPin.modelStr}, target provider/model=${selectedAlternate.provider}/${selectedAlternate.modelStr}, target generation=${autoResumeEligibility.nextGeneration}`
+        );
+        const alternateTargets = orderedTargets.filter(
+          (t) =>
+            t.modelStr === selectedAlternate.modelStr && t.provider === selectedAlternate.provider
+        );
+        orderedTargets = alternateTargets;
+        activeNativeTurnPin = null;
+        isAutoResuming = true;
+      } else {
+        targetResolution.quotaShareRelease?.();
+        log.warn(
+          "COMBO",
+          `Native Codex turn cannot continue: pinned model ${activeNativeTurnPin.modelStr} is unavailable (model-scoped); auto-resume rejected (${autoResumeEligibility.reason}); preserving turn pin and terminating turn`
+        );
+        return createPinnedModelUnavailableResponse();
+      }
     } else {
       orderedTargets = pinnedTargets;
       log.info(
@@ -1810,12 +1843,30 @@ async function handleComboChatInner({
             }
 
             if (clientManagedResponsesContext && effectiveConnectionId) {
-              pinNativeCodexTurn({
-                body,
-                comboName: combo.name,
-                target,
-                connectionId: effectiveConnectionId,
-              });
+              if (isAutoResuming) {
+                const nextGen = advanceNativeCodexTurnGeneration(
+                  body as Record<string, unknown>,
+                  combo.name
+                );
+                log.info(
+                  "COMBO",
+                  `Native Codex auto-resume routed: new provider/model=${target.modelStr} on connection ${effectiveConnectionId.slice(0, 8)} (logical turn generation ${nextGen})`
+                );
+                pinNativeCodexTurn({
+                  body,
+                  comboName: combo.name,
+                  target,
+                  connectionId: effectiveConnectionId,
+                  generation: nextGen ?? undefined,
+                });
+              } else {
+                pinNativeCodexTurn({
+                  body,
+                  comboName: combo.name,
+                  target,
+                  connectionId: effectiveConnectionId,
+                });
+              }
             }
 
             // Success decay: a healthy response walks the model's lockout failure
