@@ -75,6 +75,7 @@ import {
   recordModelLockoutFailure,
   retryHintBypassesMaxCooldownMs,
   isProviderModelUnsupported400,
+  isRequestValidation400,
 } from "@omniroute/open-sse/services/accountFallback.ts";
 import { isSharedWalletCredits402 } from "@omniroute/open-sse/services/accountFallback/sharedWalletCredits.ts";
 import { isLocalProvider } from "@omniroute/open-sse/config/providerRegistry.ts";
@@ -2727,6 +2728,20 @@ export async function markAccountUnavailable(
         `${connectionId.slice(0, 8)} provider_model_unsupported 400 (${provider}/${model ?? "n/a"}) — skipping account cooldown, letting combo advance`
       );
       return { shouldFallback: false, cooldownMs: 0, reason: "provider_model_unsupported" };
+    }
+
+    if (isRequestValidation400(status, errorText)) {
+      await updateProviderConnection(connectionId, {
+        lastError: sanitizeErrorMessage(errorText) || "Request validation failed",
+        lastErrorType: "request_validation",
+        errorCode: status,
+        lastErrorAt: new Date().toISOString(),
+      });
+      log.info(
+        "AUTH",
+        `${connectionId.slice(0, 8)} request_validation 400 (${provider ?? "n/a"}/${model ?? "n/a"}), skipping account failover loop`
+      );
+      return { shouldFallback: false, cooldownMs: 0, reason: "request_validation" };
     }
 
     const effectiveProviderProfile =

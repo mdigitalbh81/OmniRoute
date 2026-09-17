@@ -757,7 +757,7 @@ export function fixToolPairs(messages: Record<string, unknown>[]) {
   }
 
   // Pass 4: Filter user/tool messages to remove tool_result without tool_use
-  return filteredMessages
+  const pass4Messages = filteredMessages
     .map((msg) => {
       if (msg.role === "tool" && msg.tool_call_id) {
         if (!toolCallIds.has(msg.tool_call_id)) return null;
@@ -789,6 +789,129 @@ export function fixToolPairs(messages: Record<string, unknown>[]) {
       return msg;
     })
     .filter(Boolean) as Record<string, unknown>[];
+
+  // Pass 5: Disambiguate duplicate tool call IDs across turns (FIFO order).
+  // Upstream Gemini/Antigravity rejects duplicate functionCall.id/functionResponse.id with 400 INVALID_ARGUMENT.
+  const seenCallIds = new Set<string>();
+  const idCounts = new Map<string, number>();
+  const pendingRenames = new Map<string, string[]>();
+
+  return pass4Messages.map((msg) => {
+    if (msg.role === "assistant") {
+      let modified = false;
+      let newToolCalls = msg.tool_calls;
+      let newContent = msg.content;
+
+      if (Array.isArray(msg.tool_calls)) {
+        newToolCalls = (msg.tool_calls as Array<Record<string, unknown>>).map((tc) => {
+          const id = typeof tc?.id === "string" ? tc.id : "";
+          if (!id) return tc;
+          if (seenCallIds.has(id)) {
+            modified = true;
+            let count = (idCounts.get(id) || 1) + 1;
+            let newId = `${id}_${count}`;
+            while (seenCallIds.has(newId)) {
+              count++;
+              newId = `${id}_${count}`;
+            }
+            idCounts.set(id, count);
+            seenCallIds.add(newId);
+            const queue = pendingRenames.get(id) || [];
+            queue.push(newId);
+            pendingRenames.set(id, queue);
+            return { ...tc, id: newId };
+          } else {
+            seenCallIds.add(id);
+            idCounts.set(id, 1);
+            const queue = pendingRenames.get(id) || [];
+            queue.push(id);
+            pendingRenames.set(id, queue);
+            return tc;
+          }
+        });
+      }
+
+      if (Array.isArray(msg.content)) {
+        newContent = (msg.content as Array<Record<string, unknown>>).map((block) => {
+          if (block?.type === "tool_use" && typeof block?.id === "string" && block.id) {
+            const id = block.id;
+            if (seenCallIds.has(id)) {
+              modified = true;
+              let count = (idCounts.get(id) || 1) + 1;
+              let newId = `${id}_${count}`;
+              while (seenCallIds.has(newId)) {
+                count++;
+                newId = `${id}_${count}`;
+              }
+              idCounts.set(id, count);
+              seenCallIds.add(newId);
+              const queue = pendingRenames.get(id) || [];
+              queue.push(newId);
+              pendingRenames.set(id, queue);
+              return { ...block, id: newId };
+            } else {
+              seenCallIds.add(id);
+              idCounts.set(id, 1);
+              const queue = pendingRenames.get(id) || [];
+              queue.push(id);
+              pendingRenames.set(id, queue);
+              return block;
+            }
+          }
+          return block;
+        });
+      }
+
+      if (modified) {
+        return {
+          ...msg,
+          ...(newToolCalls ? { tool_calls: newToolCalls } : {}),
+          ...(newContent ? { content: newContent } : {}),
+        };
+      }
+      return msg;
+    }
+
+    if (msg.role === "tool" && typeof msg.tool_call_id === "string" && msg.tool_call_id) {
+      const id = msg.tool_call_id;
+      const queue = pendingRenames.get(id);
+      if (queue && queue.length > 0) {
+        const newId = queue.shift()!;
+        if (newId !== id) {
+          return { ...msg, tool_call_id: newId };
+        }
+      }
+      return msg;
+    }
+
+    if (msg.role === "user" && Array.isArray(msg.content)) {
+      let modified = false;
+      const newContent = (msg.content as Array<Record<string, unknown>>).map((block) => {
+        if (
+          block?.type === "tool_result" &&
+          typeof block?.tool_use_id === "string" &&
+          block.tool_use_id
+        ) {
+          const id = block.tool_use_id;
+          const queue = pendingRenames.get(id);
+          if (queue && queue.length > 0) {
+            const newId = queue.shift()!;
+            if (newId !== id) {
+              modified = true;
+              return { ...block, tool_use_id: newId };
+            }
+          }
+        }
+        return block;
+      });
+      if (modified) {
+        return { ...msg, content: newContent };
+      }
+      return msg;
+    }
+
+    return msg;
+  });
 }
 
 /**

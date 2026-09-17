@@ -238,6 +238,7 @@ export function shouldRecordProviderBreakerFailure(args: {
 
 const REQUEST_SCOPED_UPSTREAM_ERROR_CODES: Record<string, true> = {
   context_length_exceeded: true,
+  invalid_argument: true,
   upstream_empty_response: true,
   upstream_response_failed: true,
   // Local combo per-target timer (targetTimeoutRunner) — not a connection health signal.
@@ -278,7 +279,11 @@ export function isComboRequestScopedFailure(
   );
 }
 
-const INPUT_BOUND_ERROR_CODES = new Set(["context_length_exceeded", "context_window_exceeded"]);
+const INPUT_BOUND_ERROR_CODES = new Set([
+  "context_length_exceeded",
+  "context_window_exceeded",
+  "invalid_argument",
+]);
 
 /**
  * #8375: Whether an upstream error is input-bound — i.e. determined solely by the

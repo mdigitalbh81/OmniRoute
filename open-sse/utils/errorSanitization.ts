@@ -14,7 +14,8 @@ const STRONG_CREDENTIAL_TOKEN_SOURCE =
   "github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|" +
   "xox[a-z]-[A-Za-z0-9-]{10,}|(?:AKIA|ASIA)[A-Z0-9]{16}|" +
   "(?<![A-Za-z0-9])sk[-_][A-Za-z0-9._~+/=-]{8,}|" +
-  "[A-Za-z0-9]{3,}sk[-_][A-Za-z0-9._~+/=-]{8,})";
+  "[A-Za-z0-9]{3,}sk[-_][A-Za-z0-9._~+/=-]{8,}|" +
+  "ya29\\.[A-Za-z0-9_-]{20,})";
 const STRONG_CREDENTIAL_TOKEN = new RegExp(STRONG_CREDENTIAL_TOKEN_SOURCE, "i");
 const STRONG_CREDENTIAL_TOKEN_GLOBAL = new RegExp(STRONG_CREDENTIAL_TOKEN_SOURCE, "gi");
 
@@ -32,6 +33,13 @@ const CREDENTIAL_LABELS = [
   ["token_v2", true],
   ["tokenv2", true],
   ["cf_clearance", true],
+  ["sapisid", true],
+  ["apisid", true],
+  ["hsid", true],
+  ["ssid", true],
+  ["osid", true],
+  ["sid", true],
+  ["__secure-enid", true],
   ["credentials", true],
   ["credential", true],
   ["session id", true],
@@ -621,7 +629,8 @@ export function redactSensitiveErrorText(value: string): string {
   const catalogRedacted = redactKnownCredentialPatterns(redactSensitiveUrlCredentials(normalized));
   const commonCredentialsRedacted = redactBase64DataUrls(redactPrivateKeyPemBlocks(catalogRedacted))
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, "$1 [REDACTED]")
-    .replace(STRONG_CREDENTIAL_TOKEN_GLOBAL, "[REDACTED]");
+    .replace(STRONG_CREDENTIAL_TOKEN_GLOBAL, "[REDACTED]")
+    .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, "[REDACTED:email]");
   return redactLabeledCredentialAssignments(commonCredentialsRedacted);
 }
 

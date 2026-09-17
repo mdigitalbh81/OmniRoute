@@ -25,6 +25,11 @@ export const CREDENTIAL_PATTERNS: CredentialPattern[] = [
   // over-redacting a string that merely starts with AIza costs nothing; under-redacting
   // one leaks a credential, so the loose bound is the correct side to err on.
   { name: "google", regex: /AIza[0-9A-Za-z_-]{20,}/g, replacement: "[REDACTED:google]" },
+  {
+    name: "google_oauth",
+    regex: /\bya29\.[0-9A-Za-z_-]{20,}\b/g,
+    replacement: "[REDACTED:google_oauth]",
+  },
   { name: "huggingface", regex: /hf_[A-Za-z0-9]{34}/g, replacement: "[REDACTED:hf]" },
   { name: "replicate", regex: /r8_[A-Za-z0-9]{37}/g, replacement: "[REDACTED:replicate]" },
   { name: "github", regex: /gh[pousr]_[A-Za-z0-9]{36,}/g, replacement: "[REDACTED:github]" },

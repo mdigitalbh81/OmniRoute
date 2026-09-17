@@ -133,6 +133,7 @@ const SAFE_PUBLIC_ERROR_IDENTIFIERS = new Set([
   "invalid_acp_frame",
   "invalid_acp_upstream",
   "invalid_api_key",
+  "invalid_argument",
   "invalid_authentication",
   "invalid_connection_id",
   "invalid_grant",

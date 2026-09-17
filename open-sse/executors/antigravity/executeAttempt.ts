@@ -9,6 +9,9 @@ import { mergeAbortSignals, type ExecutorLog } from "../base.ts";
 import { applyFingerprint, isCliCompatEnabled } from "../../config/cliFingerprints.ts";
 import { buildAntigravityUpstreamError } from "../antigravityUpstreamError.ts";
 import { maybeTriggerReactiveModelSync } from "@/lib/providerModels/reactiveModelSync.ts";
+import crypto from "crypto";
+import { sanitizeErrorMessage } from "../../utils/errorSanitization.ts";
+import { isRequestValidation400 } from "../../services/accountFallback.ts";
 import {
   HTTP_STATUS,
   STREAM_READINESS_TIMEOUT_MS,
@@ -530,16 +533,156 @@ export async function tryEmbedLongRetryAfter(
 }
 
 /** Build the sanitized JSON error result shared by the non-streaming and streaming paths. */
+export function logAntigravityUpstreamFailureTelemetry(
+  log: SafeAntigravityLog | null | undefined,
+  model: string,
+  status: number,
+  rawBody: string,
+  transformedBody: Record<string, unknown>
+): string {
+  let upstreamCode = "UNKNOWN";
+  let upstreamMessage = "";
+  let parsedJson: Record<string, unknown> | null = null;
+  try {
+    parsedJson = JSON.parse(rawBody);
+  } catch {
+    // not JSON
+  }
+  if (parsedJson && typeof parsedJson === "object") {
+    if (parsedJson.error && typeof parsedJson.error === "object") {
+      const err = parsedJson.error as Record<string, unknown>;
+      if (typeof err.message === "string") upstreamMessage = err.message;
+      if (typeof err.status === "string") upstreamCode = err.status;
+      else if (err.code != null) upstreamCode = String(err.code);
+    } else {
+      if (typeof parsedJson.message === "string") upstreamMessage = parsedJson.message;
+      if (typeof parsedJson.status === "string") upstreamCode = parsedJson.status;
+      else if (typeof parsedJson.error === "string") upstreamMessage = parsedJson.error;
+      else if (parsedJson.code != null) upstreamCode = String(parsedJson.code);
+    }
+  } else if (rawBody) {
+    upstreamCode = "NON_JSON";
+    upstreamMessage = sanitizeErrorMessage(
+      rawBody
+        .slice(0, 200)
+        .replace(/[\r\n]+/g, " ")
+        .trim()
+    );
+  }
+  upstreamMessage = sanitizeErrorMessage(upstreamMessage)
+    .replace(/[\r\n]+/g, " ")
+    .trim();
+  if (upstreamMessage.length > 300) {
+    upstreamMessage = upstreamMessage.slice(0, 300) + "... [TRUNCATED]";
+  }
+
+  let errorClass = "unknown";
+  let retryable = false;
+  let accountSpecific = false;
+
+  const combinedErrorText = `${upstreamCode} ${upstreamMessage}`;
+  const isReqVal = isRequestValidation400(status, combinedErrorText);
+
+  if (isReqVal || upstreamCode === "INVALID_ARGUMENT") {
+    errorClass = "request_validation";
+    retryable = false;
+    accountSpecific = false;
+  } else if (status === 401 || status === 403) {
+    errorClass = status === 401 ? "authentication" : "permission_denied";
+    retryable = false;
+    accountSpecific = true;
+  } else if (status === 429) {
+    errorClass = "rate_limit";
+    retryable = true;
+    accountSpecific = true;
+  } else if (status >= 500) {
+    errorClass = "server_error";
+    retryable = true;
+    accountSpecific = false;
+  } else if (status === 404) {
+    errorClass = "not_found";
+    retryable = false;
+    accountSpecific = false;
+  }
+
+  const req = (
+    transformedBody?.request && typeof transformedBody.request === "object"
+      ? transformedBody.request
+      : transformedBody
+  ) as Record<string, unknown> | undefined;
+
+  const contents = (
+    Array.isArray(req?.contents)
+      ? req.contents
+      : Array.isArray(transformedBody?.messages)
+        ? transformedBody.messages
+        : []
+  ) as Array<Record<string, unknown>>;
+
+  const rawTools = (
+    Array.isArray(req?.tools)
+      ? req.tools
+      : Array.isArray(transformedBody?.tools)
+        ? transformedBody.tools
+        : []
+  ) as Array<Record<string, unknown>>;
+
+  let toolCount = 0;
+  for (const t of rawTools) {
+    if (Array.isArray(t?.functionDeclarations)) {
+      toolCount += t.functionDeclarations.length;
+    } else {
+      toolCount += 1;
+    }
+  }
+  const messagesCount = contents.length;
+
+  const structuralMetadata = {
+    msgCount: messagesCount,
+    roles: contents.map((c) => c?.role || ""),
+    partsSummary: contents.map((c) =>
+      Array.isArray(c?.parts)
+        ? c.parts
+            .map((p) =>
+              Object.keys(p && typeof p === "object" ? p : {})
+                .sort()
+                .join("+")
+            )
+            .join(",")
+        : ""
+    ),
+    toolCount,
+  };
+  const payloadFingerprint = crypto
+    .createHash("sha256")
+    .update(JSON.stringify(structuralMetadata))
+    .digest("hex")
+    .slice(0, 16);
+
+  const line = `provider=antigravity model=${model} status=${status} errorClass=${errorClass} upstreamCode=${upstreamCode} upstreamMessage=${upstreamMessage} retryable=${retryable} accountSpecific=${accountSpecific} payloadFingerprint=${payloadFingerprint} messages=${messagesCount} tools=${toolCount}`;
+  log?.warn?.("TELEMETRY", line);
+  return line;
+}
+
 async function buildUpstreamErrorResult(
   response: Response,
   url: string,
   finalHeaders: Record<string, string>,
-  transformedBody: Record<string, unknown>
+  transformedBody: Record<string, unknown>,
+  log?: SafeAntigravityLog | null,
+  model?: string
 ): Promise<SsePassthroughResult> {
   const rawBody = await response
     .clone()
     .text()
     .catch(() => "");
+  logAntigravityUpstreamFailureTelemetry(
+    log,
+    model ?? "unknown",
+    response.status,
+    rawBody,
+    transformedBody
+  );
   const errorBody = buildAntigravityUpstreamError(response.status, response.statusText, rawBody);
   return {
     response: new Response(JSON.stringify(errorBody), {
@@ -568,12 +711,14 @@ async function buildNonStreamingExecuteOnceResult(
   transformedBody: Record<string, unknown>,
   accountId: string,
   signal: AbortSignal | null | undefined,
-  onCreditsUpdate: OnAntigravityCreditsUpdate
+  onCreditsUpdate: OnAntigravityCreditsUpdate,
+  log?: SafeAntigravityLog | null,
+  model?: string
 ): Promise<SsePassthroughResult> {
   // #3229: surface a real upstream error instead of masking a 4xx/5xx as an
   // empty `chat.completion` envelope.
   if (!response.ok) {
-    return buildUpstreamErrorResult(response, url, finalHeaders, transformedBody);
+    return buildUpstreamErrorResult(response, url, finalHeaders, transformedBody, log, model);
   }
 
   if (response.body) {
@@ -621,10 +766,12 @@ async function buildStreamingExecuteOnceResult(
   transformedBody: Record<string, unknown>,
   accountId: string,
   signal: AbortSignal | null | undefined,
-  onCreditsUpdate: OnAntigravityCreditsUpdate
+  onCreditsUpdate: OnAntigravityCreditsUpdate,
+  log?: SafeAntigravityLog | null,
+  model?: string
 ): Promise<SsePassthroughResult> {
   if (!response.ok) {
-    return buildUpstreamErrorResult(response, url, finalHeaders, transformedBody);
+    return buildUpstreamErrorResult(response, url, finalHeaders, transformedBody, log, model);
   }
 
   if (response.body) {
@@ -679,7 +826,9 @@ export async function buildFinalAntigravityResult(
   transformedBody: Record<string, unknown>,
   accountId: string,
   signal: AbortSignal | null | undefined,
-  onCreditsUpdate: OnAntigravityCreditsUpdate
+  onCreditsUpdate: OnAntigravityCreditsUpdate,
+  log?: SafeAntigravityLog | null,
+  model?: string
 ): Promise<SsePassthroughResult> {
   if (!stream) {
     return buildNonStreamingExecuteOnceResult(
@@ -689,7 +838,9 @@ export async function buildFinalAntigravityResult(
       transformedBody,
       accountId,
       signal,
-      onCreditsUpdate
+      onCreditsUpdate,
+      log,
+      model
     );
   }
   return buildStreamingExecuteOnceResult(
@@ -699,6 +850,8 @@ export async function buildFinalAntigravityResult(
     transformedBody,
     accountId,
     signal,
-    onCreditsUpdate
+    onCreditsUpdate,
+    log,
+    model
   );
 }

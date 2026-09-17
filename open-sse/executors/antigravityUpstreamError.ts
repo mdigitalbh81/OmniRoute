@@ -36,5 +36,30 @@ export function buildAntigravityUpstreamError(status: number, statusText: string
       upstreamDetails
     );
   }
-  return buildErrorBody(status, `Antigravity upstream error (${status})${suffix}`, upstreamDetails);
+  let upstreamMessage = "";
+  let upstreamCode: string | undefined;
+  if (upstreamDetails && typeof upstreamDetails === "object") {
+    const d = upstreamDetails as Record<string, unknown>;
+    if (d.error && typeof d.error === "object") {
+      const err = d.error as Record<string, unknown>;
+      if (typeof err.message === "string") upstreamMessage = err.message;
+      if (typeof err.status === "string") upstreamCode = err.status;
+      else if (typeof err.code === "string" || typeof err.code === "number")
+        upstreamCode = String(err.code);
+    } else {
+      if (typeof d.message === "string") upstreamMessage = d.message;
+      if (typeof d.status === "string") upstreamCode = d.status;
+      else if (typeof d.error === "string") upstreamMessage = d.error;
+    }
+  }
+  if (upstreamMessage.length > 500) {
+    upstreamMessage = upstreamMessage.slice(0, 500) + "... [TRUNCATED]";
+  }
+  const message = upstreamMessage
+    ? `Antigravity upstream error (${status})${suffix}: ${upstreamMessage}`
+    : `Antigravity upstream error (${status})${suffix}`;
+  const classification = upstreamCode
+    ? { code: upstreamCode, type: status === 400 ? "invalid_request_error" : undefined }
+    : undefined;
+  return buildErrorBody(status, message, upstreamDetails, classification);
 }
