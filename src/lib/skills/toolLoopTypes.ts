@@ -189,7 +189,7 @@ export interface NonStreamingClientTranslateInput {
    */
   historyMessages?: unknown[] | null;
   responseToolNameMap: Map<string, string> | null;
-  requestToolIdentityMap: Map<string, { namespace?: string; name: string }> | null;
+  requestToolIdentityMap: Map<string, { namespace?: string; name: string } | string> | null;
   reasoningCacheScope: string | null;
   clientHeaders: Headers | Record<string, unknown> | null;
   isClaudeCodeCompatible: boolean;

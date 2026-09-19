@@ -87,7 +87,7 @@ export interface ProviderLegInput {
   effectiveModel?: string;
   translatedBody?: Record<string, unknown>;
   toolNameMap?: Map<string, string> | null;
-  requestToolIdentityMap?: Map<string, { namespace?: string; name: string }> | null;
+  requestToolIdentityMap?: Map<string, { namespace?: string; name: string } | string> | null;
   reasoningCacheScope?: string | null;
   clientHeaders?: Headers | Record<string, unknown> | null;
   isClaudeCodeCompatible?: boolean;

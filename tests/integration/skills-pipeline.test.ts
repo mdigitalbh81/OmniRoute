@@ -1039,7 +1039,8 @@ test("web_search fallback executes stream:true responses requests non-streaming 
     });
   };
 
-  const response = await handleChat(
+  // 1. web_search merely AVAILABLE and tool_choice absent/auto => stream remains true
+  const streamTrueResponse = await handleChat(
     buildRequest({
       url: "http://localhost/v1/responses",
       authKey: apiKey.key,
@@ -1057,17 +1058,58 @@ test("web_search fallback executes stream:true responses requests non-streaming 
       },
     })
   );
-  const json = (await response.json()) as {
-    output: Array<Record<string, unknown>>;
-  };
+  assert.equal(streamTrueResponse.status, 200);
+  assert.equal(upstreamBodies.length, 1);
+  assert.equal(
+    upstreamBodies[0].stream,
+    true,
+    "upstream receives stream=true when web_search merely available"
+  );
+
+  // 2. web_search EXPLICITLY selected tool_choice => server-side fallback uses stream=false
+  const response = await handleChat(
+    buildRequest({
+      url: "http://localhost/v1/responses",
+      authKey: apiKey.key,
+      body: {
+        model: "openai/gpt-4o-mini",
+        stream: true,
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "Search the web for a streaming result" }],
+          },
+        ],
+        tools: [{ type: "web_search_preview", search_context_size: "low" }],
+        tool_choice: { type: "web_search_preview" },
+      },
+    })
+  );
+  let json: { output: Array<Record<string, unknown>> };
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("text/event-stream")) {
+    const text = await response.text();
+    const match = text.match(/event:\s*response\.completed\r?\ndata:\s*(.+)$/m);
+    if (match) {
+      const parsed = JSON.parse(match[1]);
+      json = (parsed.response || parsed) as { output: Array<Record<string, unknown>> };
+    } else {
+      throw new Error("Missing response.completed in SSE response: " + text);
+    }
+  } else {
+    json = (await response.json()) as {
+      output: Array<Record<string, unknown>>;
+    };
+  }
   const webSearchCall = json.output.find((item) => item.type === "web_search_call");
   const functionCall = json.output.find((item) => item.type === "function_call");
   const functionCallOutput = json.output.find((item) => item.type === "function_call_output");
 
   assert.equal(response.status, 200);
   // The upstream must have been called non-streaming so interception can run.
-  assert.equal(upstreamBodies.length, 1);
-  assert.equal(upstreamBodies[0].stream, false);
+  assert.equal(upstreamBodies.length, 2);
+  assert.equal(upstreamBodies[1].stream, false);
   assert.ok(webSearchCall, "should return a web_search_call item for a stream:true request");
   const webSearchAction = webSearchCall?.action as
     { query?: string; sources?: Array<Record<string, unknown>> } | undefined;

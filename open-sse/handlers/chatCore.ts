@@ -131,10 +131,12 @@ import { sanitizeKiroTools } from "../utils/kiroSanitizer.ts";
 import { splitMisplacedToolResults } from "../translator/helpers/claudeHelper.ts";
 import { ensureCacheControlOnLastUserMessage } from "../services/claudeCodeConstraints.ts";
 import {
+  formatSSE,
   createSSETransformStreamWithLogger,
   createPassthroughStreamWithLogger,
   COLORS,
 } from "../utils/stream.ts";
+import { createEventEmitter } from "../translator/response/openai-responses/eventEmitter.ts";
 import { ensureStreamReadiness } from "../utils/streamReadiness.ts";
 import { resolveSuppressThinkClose, THINKING_MARKER_HEADER } from "../utils/thinkCloseMarker.ts";
 import { resolveStreamReadinessTimeout } from "../utils/streamReadinessPolicy.ts";
@@ -456,6 +458,98 @@ type VideoBridgeLogParam = { observed: boolean; redaction: VideoBridgeLogRedacti
  */
 // extractSystemRoleMessages extracted to chatCore/claudeSystemRole.ts (#3501); re-exported above so
 // existing importers (e.g. tests/unit/system-role-extraction.test.ts) keep resolving it from here.
+export function isExplicitWebSearchToolChoice(toolChoice: unknown): boolean {
+  if (!toolChoice) return false;
+  if (typeof toolChoice === "string") {
+    return /^web_search/.test(toolChoice) || toolChoice === "omniroute_web_search";
+  }
+  if (typeof toolChoice !== "object") return false;
+  const tc = toolChoice as Record<string, unknown>;
+  const type = typeof tc.type === "string" ? tc.type : "";
+  if (/^web_search/.test(type)) return true;
+  const name =
+    typeof tc.name === "string"
+      ? tc.name
+      : typeof (tc.function as Record<string, unknown>)?.name === "string"
+        ? ((tc.function as Record<string, unknown>).name as string)
+        : "";
+  return /^web_search/.test(name) || name === "omniroute_web_search";
+}
+
+function bridgeCompletedResponsesToSse(
+  responseObj: Record<string, unknown>,
+  sourceFormat: string
+): string {
+  const { events, emit } = createEventEmitter({ seq: 0 });
+  const responseId = (typeof responseObj.id === "string" && responseObj.id) || `resp_${Date.now()}`;
+  const createdAt =
+    typeof responseObj.created_at === "number"
+      ? responseObj.created_at
+      : typeof responseObj.created === "number"
+        ? responseObj.created
+        : Math.floor(Date.now() / 1000);
+  const model = typeof responseObj.model === "string" ? responseObj.model : undefined;
+  const output = Array.isArray(responseObj.output)
+    ? (responseObj.output as Array<Record<string, unknown>>)
+    : [];
+
+  const createdResponse: Record<string, unknown> = {
+    id: responseId,
+    object: "response",
+    created_at: createdAt,
+    status: "in_progress",
+    background: false,
+    error: null,
+    output: [],
+  };
+  if (model) createdResponse.model = model;
+  emit("response.created", {
+    type: "response.created",
+    response: createdResponse,
+  });
+
+  const inProgressResponse: Record<string, unknown> = {
+    id: responseId,
+    object: "response",
+    created_at: createdAt,
+    status: "in_progress",
+  };
+  if (model) inProgressResponse.model = model;
+  emit("response.in_progress", {
+    type: "response.in_progress",
+    response: inProgressResponse,
+  });
+
+  for (let i = 0; i < output.length; i++) {
+    const item = output[i];
+    emit("response.output_item.added", {
+      type: "response.output_item.added",
+      output_index: i,
+      item,
+    });
+    emit("response.output_item.done", {
+      type: "response.output_item.done",
+      output_index: i,
+      item,
+    });
+  }
+
+  const completedResponse: Record<string, unknown> = {
+    ...responseObj,
+    id: responseId,
+    object: "response",
+    created_at: createdAt,
+    status: "completed",
+    output,
+  };
+  emit("response.completed", {
+    type: "response.completed",
+    response: completedResponse,
+  });
+
+  return events.map((e) => formatSSE(e, sourceFormat)).join("");
+}
+
 export async function handleChatCore({
   body,
   modelInfo,
@@ -922,6 +1016,8 @@ export async function handleChatCore({
     })
     .filter(Boolean);
 
+  const rawToolChoice = (body as Record<string, unknown>)?.tool_choice;
+  let webSearchForcedNonStream = false;
   const { body: bodyWithWebSearchFallback, fallback: webSearchFallbackPlan } =
     prepareWebSearchFallbackBody(body as Record<string, unknown>, {
       provider,
@@ -940,10 +1036,13 @@ export async function handleChatCore({
     // JSON-tolerating Responses clients (pi-web-access) consume it directly.
     if (
       sourceFormat === FORMATS.OPENAI_RESPONSES &&
-      (body as Record<string, unknown>).stream === true
+      (body as Record<string, unknown>).stream === true &&
+      (isExplicitWebSearchToolChoice(rawToolChoice) ||
+        isExplicitWebSearchToolChoice((body as Record<string, unknown>).tool_choice))
     ) {
       clientRequestedResponsesStream = true;
       (body as Record<string, unknown>).stream = false;
+      webSearchForcedNonStream = true;
       log?.info?.("TOOLS", `web_search fallback forced non-streaming response for ${provider}`);
     }
     log?.info?.(
@@ -5603,6 +5702,24 @@ export async function handleChatCore({
           connectionId: credentials?.connectionId ?? null,
         })
       );
+
+      if (webSearchForcedNonStream && sourceFormat === FORMATS.OPENAI_RESPONSES) {
+        const sseBody = bridgeCompletedResponsesToSse(
+          translatedResponse as Record<string, unknown>,
+          sourceFormat
+        );
+        const sseHeaders: Record<string, string> = {
+          ...responseHeaders,
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+        };
+        delete sseHeaders["Content-Length"];
+        return {
+          success: true,
+          response: new Response(sseBody, { headers: sseHeaders }),
+        };
+      }
 
       return {
         success: true,

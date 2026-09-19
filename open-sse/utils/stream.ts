@@ -56,6 +56,10 @@ import { createStreamFailureAborter } from "./streamFailureBoundary.ts";
 import { recordToolLatency } from "../services/toolLatencyTracker.ts";
 import { extractToolSchemaMap } from "../translator/response/openai-responses/toolSchemas.ts";
 import {
+  applyToolIdentity,
+  type ToolIdentityValue,
+} from "../handlers/chatCore/requestToolIdentity.ts";
+import {
   generateSessionId,
   markToolFinish,
   consumeToolFinishTime,
@@ -189,7 +193,7 @@ type StreamOptions = {
    * `response.output_item.added` / `response.output_item.done` and emits
    * codex-compatible `namespace` + `name` fields.
    */
-  requestToolIdentityMap?: Map<string, { namespace: string; name: string }> | null;
+  requestToolIdentityMap?: Map<string, ToolIdentityValue> | null;
 };
 
 type TranslateState = ReturnType<typeof initState> & {
@@ -208,7 +212,7 @@ type TranslateState = ReturnType<typeof initState> & {
   /** #6951 — per-tool JSON Schema (from request `tools[]`), keyed by tool name. */
   toolSchemas?: Map<string, Record<string, unknown>> | null;
   customToolNames?: ReadonlySet<string>;
-  requestToolIdentityMap?: Map<string, { namespace: string; name: string }> | null;
+  requestToolIdentityMap?: Map<string, ToolIdentityValue> | null;
   upstreamError?: {
     status: number;
     type: string;
@@ -235,9 +239,9 @@ function asRecord(value: unknown): JsonRecord {
 // Chat wire. Codex's ResponseItem::FunctionCall schema declares an independent
 // `namespace: Option<String>` field (see codex-rs/protocol/src/models.rs and the
 // `function_call_deserializes_optional_namespace` round-trip test); emit it back.
-function restoreResponsesPassthroughFunctionCallIdentity(
+/* @testonly */ export function restoreResponsesPassthroughFunctionCallIdentity(
   parsed: JsonRecord,
-  requestToolIdentityMap: Map<string, { namespace: string; name: string }> | null | undefined
+  requestToolIdentityMap: Map<string, ToolIdentityValue> | null | undefined
 ): boolean {
   if (!(requestToolIdentityMap instanceof Map)) return false;
 
@@ -250,11 +254,7 @@ function restoreResponsesPassthroughFunctionCallIdentity(
     const identity = requestToolIdentityMap.get(functionCall.name);
     if (!identity) return false;
 
-    const changed =
-      functionCall.namespace !== identity.namespace || functionCall.name !== identity.name;
-    functionCall.namespace = identity.namespace;
-    functionCall.name = identity.name;
-    return changed;
+    return applyToolIdentity(functionCall as { name?: string; namespace?: string }, identity);
   };
 
   if (parsed.type === "response.output_item.added" || parsed.type === "response.output_item.done") {
@@ -3058,7 +3058,7 @@ export function createSSETransformStreamWithLogger(
   copilotCompatibleReasoning = false,
   suppressThinkClose = false,
   customToolNames: ReadonlySet<string> = new Set(),
-  requestToolIdentityMap: Map<string, { namespace: string; name: string }> | null = null,
+  requestToolIdentityMap: Map<string, ToolIdentityValue> | null = null,
   streamBufferBytes: number = DEFAULT_STREAM_BUFFER_BYTES
 ) {
   return createSSEStream({
@@ -3093,7 +3093,7 @@ export function createPassthroughStreamWithLogger(
   apiKeyInfo: unknown = null,
   onFailure: ((payload: StreamFailurePayload) => boolean | void | Promise<void>) | null = null,
   clientResponseFormat: string | null = null,
-  requestToolIdentityMap: Map<string, { namespace: string; name: string }> | null = null
+  requestToolIdentityMap: Map<string, ToolIdentityValue> | null = null
 ) {
   return createSSEStream({
     mode: STREAM_MODE.PASSTHROUGH,

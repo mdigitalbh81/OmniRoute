@@ -31,6 +31,7 @@ import {
 } from "../responseSanitizer.ts";
 import { isStripReasoningRequested } from "./headers.ts";
 import { applyClientUsageBuffer } from "./clientUsageBuffer.ts";
+import { applyToolIdentity } from "./requestToolIdentity.ts";
 
 export type { NonStreamingClientTranslateInput, NonStreamingClientTranslateResult };
 
@@ -131,8 +132,7 @@ export function translateNonStreamingClientResponse(
         if (item?.type !== "function_call") continue;
         const identity = requestToolIdentityMap.get(item.name);
         if (identity) {
-          item.namespace = identity.namespace;
-          item.name = identity.name;
+          applyToolIdentity(item, identity);
         }
       }
     }

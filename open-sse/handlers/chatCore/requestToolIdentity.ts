@@ -1,6 +1,36 @@
 export type NamespaceIdentity = { namespace: string; name: string };
 
 /**
+ * A tool identity entry is either a full namespace identity object (from
+ * `_namespaceToolIdentityMap`) or a plain string alias (from `_toolNameMap`,
+ * as produced on the Gemini/Antigravity path).
+ */
+export type ToolIdentityValue = NamespaceIdentity | string;
+
+/**
+ * Apply a resolved `ToolIdentityValue` to a function-call item mutably.
+ * String aliases restore only `.name`; namespace identities restore both.
+ * Returns true when any field changed.
+ */
+export function applyToolIdentity(
+  item: { name?: string; namespace?: string },
+  identity: ToolIdentityValue
+): boolean {
+  if (typeof identity === "string") {
+    const changed = item.name !== identity;
+    item.name = identity;
+    return changed;
+  }
+  if (identity && typeof identity === "object" && typeof identity.name === "string") {
+    const changed = item.namespace !== identity.namespace || item.name !== identity.name;
+    item.namespace = identity.namespace;
+    item.name = identity.name;
+    return changed;
+  }
+  return false;
+}
+
+/**
  * Return a string-valued copy only when the complete map is an alias ledger.
  *
  * The legacy `_toolNameMap` side channel can carry either response aliases or
@@ -61,7 +91,7 @@ export function resolveResponseToolNameMap(
  */
 export function extractRequestToolIdentityMap(
   translatedBody: Record<string, unknown>
-): Map<string, NamespaceIdentity> | null {
+): Map<string, ToolIdentityValue> | null {
   const namespaceIdentityMap = translatedBody._namespaceToolIdentityMap;
   const requestToolIdentityMap =
     namespaceIdentityMap instanceof Map
@@ -71,5 +101,5 @@ export function extractRequestToolIdentityMap(
         : null;
   delete translatedBody._namespaceToolIdentityMap;
   delete translatedBody._toolNameMap;
-  return requestToolIdentityMap as Map<string, NamespaceIdentity> | null;
+  return requestToolIdentityMap as Map<string, ToolIdentityValue> | null;
 }
