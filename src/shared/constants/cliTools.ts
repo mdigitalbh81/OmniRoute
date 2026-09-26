@@ -1,9 +1,9 @@
 // CLI Tools configuration
-import { getClaudeCodeDefaultModels } from "@omniroute/open-sse/config/providerRegistry";
+import { CLAUDE_CODE_DEFAULTS } from "@/shared/constants/claudeCodeModels";
 import type { CliCatalogEntry } from "@/shared/schemas/cliCatalog";
 import { GROK_BUILD_CLI_TOOL } from "@/shared/constants/cliToolsGrokBuild";
 
-const _cc = getClaudeCodeDefaultModels();
+const _cc = CLAUDE_CODE_DEFAULTS;
 type CliModel = NonNullable<CliCatalogEntry["defaultModels"]>[number];
 const createCliModel = (id: string, name: string): CliModel => ({ id, name, alias: id });
 
