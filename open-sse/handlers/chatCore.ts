@@ -483,6 +483,28 @@ export async function handleChatCore(args: Parameters<typeof handleChatCoreInner
   return withResilienceActionsContext([args], (forwarded) => handleChatCoreInner(forwarded));
 }
 
+export function isExplicitWebSearchToolChoice(toolChoice: unknown): boolean {
+  if (!toolChoice) return false;
+  if (typeof toolChoice === "string") {
+    return /^web_search/.test(toolChoice) || toolChoice === "omniroute_web_search";
+  }
+  if (typeof toolChoice !== "object") return false;
+  const tc = toolChoice as Record<string, unknown>;
+  const type = typeof tc.type === "string" ? tc.type : "";
+  if (/^web_search/.test(type)) return true;
+  const fn =
+    tc.function && typeof tc.function === "object"
+      ? (tc.function as Record<string, unknown>)
+      : null;
+  const name =
+    typeof tc.name === "string"
+      ? tc.name
+      : typeof fn?.name === "string"
+        ? fn.name
+        : "";
+  return /^web_search/.test(name) || name === "omniroute_web_search";
+}
+
 async function handleChatCoreInner({
   body,
   modelInfo,
@@ -979,6 +1001,7 @@ async function handleChatCoreInner({
     })
     .filter(Boolean);
 
+  const rawToolChoice = (body as Record<string, unknown>)?.tool_choice;
   const { body: bodyWithWebSearchFallback, fallback: webSearchFallbackPlan } =
     prepareWebSearchFallbackBody(body as Record<string, unknown>, {
       provider,
@@ -997,7 +1020,9 @@ async function handleChatCoreInner({
     // JSON-tolerating Responses clients (pi-web-access) consume it directly.
     if (
       sourceFormat === FORMATS.OPENAI_RESPONSES &&
-      (body as Record<string, unknown>).stream === true
+      (body as Record<string, unknown>).stream === true &&
+      (isExplicitWebSearchToolChoice(rawToolChoice) ||
+        isExplicitWebSearchToolChoice((body as Record<string, unknown>).tool_choice))
     ) {
       clientRequestedResponsesStream = true;
       (body as Record<string, unknown>).stream = false;
