@@ -1,0 +1,130 @@
+name: Build OOM fix ARM64
+
+on:
+  push:
+    branches:
+      - "fix/oom-codex-abort-leak-20260927"
+  workflow_dispatch:
+
+concurrency:
+  group: oom-fix-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/mdigitalbh81/omniroute
+  TAG: 3.8.51-oom-codex-abort-fix-arm64
+
+jobs:
+  focused-tests:
+    name: Focused regression tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 26
+        uses: actions/setup-node@v6
+        with:
+          node-version: "26"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund --legacy-peer-deps
+
+      - name: Run focused OOM / abort regression tests
+        env:
+          DISABLE_SQLITE_AUTO_BACKUP: "true"
+        run: |
+          node --max-old-space-size=8192             --import tsx/esm             --import ./open-sse/utils/setupPolyfill.ts             --import ./tests/_setup/isolateDataDir.ts             --test             --test-force-exit             --test-concurrency=1             tests/unit/chat-admission-abandoned-stream-lease.test.ts             tests/unit/chat-admission-pending-handler-abort-14456.test.ts             tests/unit/resource-pressure-gate-recovery.test.ts
+
+      - name: Core typecheck
+        run: npm run typecheck:core
+
+  build-arm64:
+    name: Build and push ARM64 image
+    needs: focused-tests
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Assert native ARM64 runner
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "aarch64"
+          docker info
+          free -h
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ARM64
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: runner-base
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ env.TAG }}
+            ${{ env.IMAGE }}:oomfix-${{ github.sha }}-arm64
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          build-args: |
+            OMNIROUTE_USE_TURBOPACK=0
+            OMNIROUTE_BUILD_MEMORY_MB=12288
+          cache-from: type=gha,scope=oom-fix-arm64
+          cache-to: type=gha,scope=oom-fix-arm64,mode=max,ignore-error=true
+          provenance: true
+
+      - name: Verify pushed platform and digest
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${IMAGE}:${TAG}"
+          echo "digest=${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test image
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE}:${TAG}"
+          docker image inspect "${IMAGE}:${TAG}" --format 'Arch={{.Architecture}} OS={{.Os}}'
+          docker run -d --name omniroute-smoke             -p 20128:20128             -e INITIAL_PASSWORD=CI_SMOKE_ONLY             -e OMNIROUTE_MEMORY_MB=1024             "${IMAGE}:${TAG}"
+
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:20128/api/monitoring/health >/tmp/health.json; then
+              cat /tmp/health.json
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$ok" -ne 1 ]; then
+            docker logs --tail 300 omniroute-smoke || true
+            docker inspect omniroute-smoke || true
+            exit 1
+          fi
+
+      - name: Cleanup smoke container
+        if: always()
+        run: docker rm -f omniroute-smoke >/dev/null 2>&1 || true
