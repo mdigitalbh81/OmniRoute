@@ -53,7 +53,7 @@ jobs:
         run: npm run typecheck:core
 
       - name: Open-SSE typecheck
-        run: npm run typecheck:open-sse
+        run: npm run check:open-sse-typecheck
 
   build-arm64:
     name: Build and smoke-test native ARM64
