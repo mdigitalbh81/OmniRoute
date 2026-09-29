@@ -52,7 +52,10 @@ jobs:
             tests/unit/chat-admission-abandoned-stream-lease.test.ts \
             tests/unit/chat-admission-pending-handler-abort-14456.test.ts \
             tests/unit/resource-pressure-gate-recovery.test.ts \
-            tests/unit/antigravity-streaming-passthrough.test.ts
+            tests/unit/antigravity-streaming-passthrough.test.ts \
+            tests/unit/antigravity-client-profile.test.ts \
+            tests/unit/executor-antigravity.test.ts \
+            tests/unit/provider-execution-pipeline.test.ts
 
       - name: Core typecheck
         run: npm run typecheck:core
