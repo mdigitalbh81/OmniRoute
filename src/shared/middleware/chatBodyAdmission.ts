@@ -38,6 +38,7 @@ import {
   type IngestBudgetAcquireResult,
 } from "./ingestByteAdmission";
 import {
+  checkResourcePressureGuard,
   getResourcePressureObservation,
   type PressureSeverity,
 } from "@omniroute/open-sse/utils/resourcePressure.ts";
@@ -217,10 +218,19 @@ export type ChatAdmissionShedReason =
   | "inflight_bytes_budget"
   | "resource_pressure";
 
-/** Read cached pressure severity; sampling failures must not cause false sheds. */
+/**
+ * Read pressure severity for admission decisions.
+ *
+ * Drive an active pressure check instead of relying only on the cached state.
+ * Otherwise a process that once latched "critical" can keep shedding before
+ * the sampler gets another chance to observe recovery.
+ */
 export function defaultPressureSeverity(): PressureSeverity {
   try {
-    return getResourcePressureObservation().state.severity;
+    const guard = checkResourcePressureGuard();
+    if (guard) return "critical";
+    const severity = getResourcePressureObservation().state.severity;
+    return severity === "critical" ? "high" : severity;
   } catch {
     return "normal";
   }
@@ -1114,23 +1124,19 @@ export async function admitChatRequest(
   return { admit: true, request: rebuildRequest(request, body), lease };
 }
 
-/** Release a lease if a handler rejects; otherwise bind it to the returned response lifecycle. */
-export async function releaseChatAdmissionAfterHandler(
-  responsePromise: Promise<Response>,
-  lease: ChatAdmissionLease | null
-): Promise<Response> {
-  try {
-    return releaseChatAdmissionWhenDone(await responsePromise, lease);
-  } catch (error) {
-    lease?.release();
-    throw error;
-  }
+export interface ReleaseChatAdmissionOptions {
+  /**
+   * Inbound request signal. A client disconnect may stop consuming an SSE body
+   * without calling cancel(), so this is the fallback cleanup signal.
+   */
+  readonly signal?: AbortSignal;
 }
 
 /** Hold a heavyweight lease through an SSE response without buffering the response body. */
 export function releaseChatAdmissionWhenDone(
   response: Response,
-  lease: ChatAdmissionLease | null
+  lease: ChatAdmissionLease | null,
+  options: ReleaseChatAdmissionOptions = {}
 ): Response {
   if (!lease) return response;
   const isStreaming = response.headers.get("content-type")?.includes("text/event-stream");
@@ -1140,23 +1146,44 @@ export function releaseChatAdmissionWhenDone(
   }
 
   const reader = response.body.getReader();
+  const { signal } = options;
+  let detachAbortListener = (): void => undefined;
+
+  const releaseOnce = (): void => {
+    detachAbortListener();
+    if (!lease.released) lease.release();
+  };
+
+  if (signal) {
+    const onAbort = (): void => {
+      releaseOnce();
+      void reader.cancel("client disconnected").catch(() => undefined);
+    };
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener("abort", onAbort, { once: true });
+      detachAbortListener = () => signal.removeEventListener("abort", onAbort);
+    }
+  }
+
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const { done, value } = await reader.read();
         if (done) {
-          lease.release();
+          releaseOnce();
           controller.close();
         } else {
           controller.enqueue(value);
         }
       } catch (error) {
-        lease.release();
+        releaseOnce();
         controller.error(error);
       }
     },
     async cancel(reason) {
-      lease.release();
+      releaseOnce();
       await reader.cancel(reason).catch(() => undefined);
     },
   });
@@ -1166,4 +1193,40 @@ export function releaseChatAdmissionWhenDone(
     statusText: response.statusText,
     headers: response.headers,
   });
+}
+
+/** Release a lease if a handler rejects; otherwise bind it to the returned response lifecycle. */
+export async function releaseChatAdmissionAfterHandler(
+  responsePromise: Promise<Response>,
+  lease: ChatAdmissionLease | null,
+  options: ReleaseChatAdmissionOptions = {}
+): Promise<Response> {
+  const { signal } = options;
+  let abortedWhilePending = false;
+  let detachAbortListener = (): void => undefined;
+
+  if (signal && lease) {
+    const onAbort = (): void => {
+      abortedWhilePending = true;
+      detachAbortListener();
+      if (!lease.released) lease.release();
+    };
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener("abort", onAbort, { once: true });
+      detachAbortListener = () => signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  try {
+    const response = await responsePromise;
+    detachAbortListener();
+    if (abortedWhilePending) return response;
+    return releaseChatAdmissionWhenDone(response, lease, options);
+  } catch (error) {
+    detachAbortListener();
+    lease?.release();
+    throw error;
+  }
 }
