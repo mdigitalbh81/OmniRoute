@@ -3,7 +3,7 @@ type JsonRecord = Record<string, unknown>;
 const MB = 1024 * 1024;
 const DATA_IMAGE_PREFIX = "data:image/";
 
-function enabled(): boolean {
+export function isMemoryTraceEnabled(): boolean {
   const value = String(process.env.OMNIROUTE_MEMTRACE ?? "").trim().toLowerCase();
   return value === "1" || value === "true" || value === "yes" || value === "on";
 }
@@ -51,7 +51,7 @@ export function memoryTrace(
   payload?: unknown,
   extra: Record<string, unknown> = {}
 ): void {
-  if (!enabled()) return;
+  if (!isMemoryTraceEnabled()) return;
 
   const m = process.memoryUsage();
   const media = payload === undefined
