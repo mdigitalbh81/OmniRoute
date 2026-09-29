@@ -24,6 +24,7 @@ import {
   removeHeaderCaseInsensitive,
 } from "../../services/antigravityClientProfile.ts";
 import * as prl from "../../utils/providerRequestLogging.ts";
+import { memoryTrace } from "../../utils/memoryTrace.ts";
 import {
   createCreditsExtractionTransform as createCreditsExtractionTransformImpl,
   buildSsePassthroughResult,
@@ -256,12 +257,23 @@ function serializeAntigravityRequest(
   headers: Record<string, string>,
   body: unknown
 ): { headers: Record<string, string>; bodyString: string } {
+  memoryTrace("antigravity.serialize.before-clone", body);
   const serializedBody = cloneAntigravityRequestBody(body);
+  memoryTrace("antigravity.serialize.after-clone", serializedBody);
 
   if (!isCliCompatEnabled(provider)) {
-    return { headers, bodyString: JSON.stringify(serializedBody) };
+    const bodyString = JSON.stringify(serializedBody);
+    memoryTrace("antigravity.serialize.after-stringify", undefined, {
+      bodyStringChars: bodyString.length,
+    });
+    return { headers, bodyString };
   }
-  return applyFingerprint(provider, { ...headers }, serializedBody);
+
+  const result = applyFingerprint(provider, { ...headers }, serializedBody);
+  memoryTrace("antigravity.serialize.after-fingerprint", undefined, {
+    bodyStringChars: result.bodyString.length,
+  });
+  return result;
 }
 
 function getRequestTargetModel(body: Record<string, unknown>): string {
@@ -358,7 +370,13 @@ export async function sendAntigravityRequest(
     dumpAntigravityRequestDebug(finalHeaders, transformedBody, clientProfile, log);
   }
 
+  memoryTrace("antigravity.before-provider-capture", transformedBody, {
+    bodyStringChars: serializedRequest.bodyString.length,
+  });
   await prl.captureCurrentProviderBody(url, finalHeaders, serializedRequest.bodyString, log);
+  memoryTrace("antigravity.after-provider-capture", transformedBody, {
+    bodyStringChars: serializedRequest.bodyString.length,
+  });
   let response = await fetchAntigravityWithReadinessTimeout(url, {
     method: "POST",
     headers: finalHeaders,
