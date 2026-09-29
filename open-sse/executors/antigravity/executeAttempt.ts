@@ -21,6 +21,7 @@ import {
   removeHeaderCaseInsensitive,
 } from "../../services/antigravityClientProfile.ts";
 import * as prl from "../../utils/providerRequestLogging.ts";
+import { isMemoryTraceEnabled, memoryTrace } from "../../utils/memoryTrace.ts";
 import {
   createCreditsExtractionTransform as createCreditsExtractionTransformImpl,
   buildSsePassthroughResult,
@@ -196,21 +197,6 @@ export function buildAntigravity429ErrorMessage(errorJson: unknown): string {
   return errorMessage;
 }
 
-function getChunkedOrFixedBody(bodyStr: string, stream: boolean): BodyInit {
-  if (stream) {
-    return new ReadableStream(
-      {
-        async start(controller) {
-          controller.enqueue(new TextEncoder().encode(bodyStr));
-          controller.close();
-        },
-      },
-      { highWaterMark: 16384 }
-    );
-  }
-  return bodyStr;
-}
-
 function cloneAntigravityRequestBody(body: unknown): unknown {
   if (!body || typeof body !== "object") {
     return body;
@@ -253,12 +239,23 @@ function serializeAntigravityRequest(
   headers: Record<string, string>,
   body: unknown
 ): { headers: Record<string, string>; bodyString: string } {
+  memoryTrace("antigravity.serialize.before-clone", body);
   const serializedBody = cloneAntigravityRequestBody(body);
+  memoryTrace("antigravity.serialize.after-clone", serializedBody);
 
   if (!isCliCompatEnabled(provider)) {
-    return { headers, bodyString: JSON.stringify(serializedBody) };
+    const bodyString = JSON.stringify(serializedBody);
+    memoryTrace("antigravity.serialize.after-stringify", undefined, {
+      bodyStringChars: bodyString.length,
+    });
+    return { headers, bodyString };
   }
-  return applyFingerprint(provider, { ...headers }, serializedBody);
+
+  const result = applyFingerprint(provider, { ...headers }, serializedBody);
+  memoryTrace("antigravity.serialize.after-fingerprint", undefined, {
+    bodyStringChars: result.bodyString.length,
+  });
+  return result;
 }
 
 function getRequestTargetModel(body: Record<string, unknown>): string {
@@ -357,18 +354,55 @@ export async function sendAntigravityRequest(
     dumpAntigravityRequestDebug(finalHeaders, transformedBody, clientProfile, log);
   }
 
+  memoryTrace("antigravity.before-provider-capture", transformedBody, {
+    bodyStringChars: serializedRequest.bodyString.length,
+  });
   await prl.captureCurrentProviderBody(url, finalHeaders, serializedRequest.bodyString, log);
+  memoryTrace("antigravity.after-provider-capture", transformedBody, {
+    bodyStringChars: serializedRequest.bodyString.length,
+  });
   const physicalSendOrdinal = ++physicalSendCounter.value;
   log.debug(
     "TELEMETRY",
     `[Antigravity] PhysicalSend - RequestId: ${correlationId ?? "none"}, URL: ${url}, Model: ${model}, PhysicalSend: ${physicalSendOrdinal}, RetryAttempt: ${retryAttempt}`
   );
-  let response = await fetchAntigravityWithReadinessTimeout(url, {
-    method: "POST",
-    headers: finalHeaders,
-    body: getChunkedOrFixedBody(serializedRequest.bodyString, stream),
-    ...(stream ? { duplex: "half" } : {}),
-    signal,
+  memoryTrace("antigravity.before-fetch", undefined, {
+    bodyStringChars: serializedRequest.bodyString.length,
+    requestBodyMode: "fixed-string",
+  });
+
+  // The upstream response may stream, but this request upload is finite JSON.
+  // Keep it replayable instead of wrapping it in a one-shot ReadableStream
+  // with duplex:"half"; proxyFetch/Undici can then use the normal replay path.
+  let waitTimer: ReturnType<typeof setInterval> | null = null;
+  if (isMemoryTraceEnabled()) {
+    waitTimer = setInterval(() => {
+      memoryTrace("antigravity.fetch.wait", undefined, {
+        bodyStringChars: serializedRequest.bodyString.length,
+        requestBodyMode: "fixed-string",
+      });
+    }, 2000);
+    if (typeof waitTimer === "object" && "unref" in waitTimer) {
+      (waitTimer as { unref?: () => void }).unref?.();
+    }
+  }
+
+  let response: Response;
+  try {
+    response = await fetchAntigravityWithReadinessTimeout(url, {
+      method: "POST",
+      headers: finalHeaders,
+      body: serializedRequest.bodyString,
+      signal,
+    });
+  } finally {
+    if (waitTimer) clearInterval(waitTimer);
+  }
+
+  memoryTrace("antigravity.after-fetch-headers", undefined, {
+    status: response.status,
+    bodyStringChars: serializedRequest.bodyString.length,
+    requestBodyMode: "fixed-string",
   });
 
   if (response.status === HTTP_STATUS.FORBIDDEN && finalHeaders["x-goog-user-project"]) {
@@ -384,8 +418,7 @@ export async function sendAntigravityRequest(
     response = await fetchAntigravityWithReadinessTimeout(url, {
       method: "POST",
       headers: retryHeaders,
-      body: getChunkedOrFixedBody(serializedRequest.bodyString, stream),
-      ...(stream ? { duplex: "half" } : {}),
+      body: serializedRequest.bodyString,
       signal,
     });
     finalHeaders = retryHeaders;
@@ -455,8 +488,7 @@ export async function tryCreditsRetry(
     const creditsResp = await fetchAntigravityWithReadinessTimeout(url, {
       method: "POST",
       headers: finalCreditsHeaders,
-      body: getChunkedOrFixedBody(serializedCreditsRequest.bodyString, stream),
-      ...(stream ? { duplex: "half" } : {}),
+      body: serializedCreditsRequest.bodyString,
       signal,
     });
     if (creditsResp.ok || creditsResp.status !== HTTP_STATUS.RATE_LIMITED) {
