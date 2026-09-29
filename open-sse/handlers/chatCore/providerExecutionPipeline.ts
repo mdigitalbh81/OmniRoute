@@ -431,6 +431,37 @@ export async function runProviderExecutionPipeline(
       }
     }
 
+    // Antigravity 401/403 can be account/project scoped. After the one allowed
+    // token refresh (or immediately when refresh is unavailable/failed), rotate
+    // to another eligible Antigravity connection instead of surfacing an opaque
+    // proxy 502. Keep this request-local: exclude only the failed connection.
+    if (
+      canRotateAccount &&
+      target.provider === "antigravity" &&
+      (status === 401 || status === 403)
+    ) {
+      const failedId = currentConnectionId(connection);
+      if (failedId && !excludedIds.includes(failedId)) excludedIds.push(failedId);
+
+      const nextCreds = await connection
+        .getProviderCredentials("antigravity", null, null, wire.currentModel, {
+          excludeConnectionIds: [...excludedIds],
+        })
+        .catch(() => null);
+
+      if (
+        nextCreds &&
+        !nextCreds.allRateLimited &&
+        nextCreds.connectionId &&
+        nextCreds.connectionId !== failedId
+      ) {
+        connection.replaceCredentials(nextCreds as Record<string, unknown>);
+        authRefreshed = false;
+        antigravityByopRotationPending = true;
+        continue;
+      }
+    }
+
     {
       let signatureMessage = attempt.response.statusText || "upstream error";
       try {
