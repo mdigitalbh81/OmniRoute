@@ -58,14 +58,6 @@ export function removeHeaderCaseInsensitive(headers: Record<string, string>, nam
   }
 }
 
-function getProjectHeaderValue(body: unknown): string | null {
-  const project =
-    body && typeof body === "object" ? (body as Record<string, unknown>).project : null;
-  if (typeof project !== "string" || project.trim().length === 0) return null;
-  if (project === "test-project" || project === "project-id") return null;
-  return project;
-}
-
 /** Apply the selected official client identity to a Cloud Code content request. */
 export function applyAntigravityClientProfileHeaders(
   headers: Record<string, string>,
