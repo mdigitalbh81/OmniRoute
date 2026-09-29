@@ -18,6 +18,12 @@ function asCreditRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+const STREAM_QUEUE_HIGH_WATER_MARK_BYTES = 16 * 1024;
+
+function byteLengthQueueSize(chunk: Uint8Array): number {
+  return chunk.byteLength;
+}
+
 /**
  * Create a pass-through TransformStream that extracts `remainingCredits`
  * from SSE data without consuming the stream.  The downstream client
@@ -31,8 +37,11 @@ function asCreditRecord(value: unknown): Record<string, unknown> | null {
  * @param bufferSize  Optional sliding-window buffer cap in bytes.
  *                   Pass 0 or omit for unlimited (non-streaming callers
  *                   where the full body is already buffered upstream).
- *                   The streaming path uses 16384 (16 KB) to prevent OOM
- *                   on long-lived SSE connections.  Credit-balance data
+ *                   The streaming path uses 16384 (16 KB) for the parser
+ *                   window.  The TransformStream queues are separately
+ *                   byte-accounted at 16 KB so slow downstream consumers
+ *                   apply real backpressure instead of buffering up to
+ *                   16,384 whole chunks in memory.  Credit-balance data
  *                   appears near the end of the SSE stream (after
  *                   content), so the sliding window captures it even at
  *                   16 KB -- only truly massive responses (>16 KB of
@@ -102,8 +111,14 @@ export function createCreditsExtractionTransform(
         buffer = "";
       },
     },
-    { highWaterMark: 16384 },
-    { highWaterMark: 16384 }
+    {
+      highWaterMark: STREAM_QUEUE_HIGH_WATER_MARK_BYTES,
+      size: byteLengthQueueSize,
+    },
+    {
+      highWaterMark: STREAM_QUEUE_HIGH_WATER_MARK_BYTES,
+      size: byteLengthQueueSize,
+    }
   );
 }
 
