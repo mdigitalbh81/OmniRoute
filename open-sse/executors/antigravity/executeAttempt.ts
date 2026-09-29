@@ -199,21 +199,6 @@ export function buildAntigravity429ErrorMessage(errorJson: unknown): string {
   return errorMessage;
 }
 
-function getChunkedOrFixedBody(bodyStr: string, stream: boolean): BodyInit {
-  if (stream) {
-    return new ReadableStream(
-      {
-        async start(controller) {
-          controller.enqueue(new TextEncoder().encode(bodyStr));
-          controller.close();
-        },
-      },
-      { highWaterMark: 16384 }
-    );
-  }
-  return bodyStr;
-}
-
 function cloneAntigravityRequestBody(body: unknown): unknown {
   if (!body || typeof body !== "object") {
     return body;
@@ -359,11 +344,12 @@ export async function sendAntigravityRequest(
   }
 
   await prl.captureCurrentProviderBody(url, finalHeaders, serializedRequest.bodyString, log);
+  // The upstream response may stream, but the request upload is finite JSON.
+  // Keep it as a replayable fixed body instead of a one-shot ReadableStream/duplex upload.
   let response = await fetchAntigravityWithReadinessTimeout(url, {
     method: "POST",
     headers: finalHeaders,
-    body: getChunkedOrFixedBody(serializedRequest.bodyString, stream),
-    ...(stream ? { duplex: "half" } : {}),
+    body: serializedRequest.bodyString,
     signal,
   });
 
@@ -375,8 +361,7 @@ export async function sendAntigravityRequest(
     response = await fetchAntigravityWithReadinessTimeout(url, {
       method: "POST",
       headers: retryHeaders,
-      body: getChunkedOrFixedBody(serializedRequest.bodyString, stream),
-      ...(stream ? { duplex: "half" } : {}),
+      body: serializedRequest.bodyString,
       signal,
     });
     finalHeaders = retryHeaders;
@@ -439,8 +424,7 @@ export async function tryCreditsRetry(
     const creditsResp = await fetchAntigravityWithReadinessTimeout(url, {
       method: "POST",
       headers: finalCreditsHeaders,
-      body: getChunkedOrFixedBody(serializedCreditsRequest.bodyString, stream),
-      ...(stream ? { duplex: "half" } : {}),
+      body: serializedCreditsRequest.bodyString,
       signal,
     });
     if (creditsResp.ok || creditsResp.status !== HTTP_STATUS.RATE_LIMITED) {
