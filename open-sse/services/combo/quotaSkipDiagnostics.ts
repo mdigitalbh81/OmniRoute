@@ -43,6 +43,12 @@ export function collectQuotaWindowExclusions(targets: QuotaSkipTarget[]): QuotaS
     const connPrefix = connectionId.slice(0, 8);
 
     for (const [key, quota] of Object.entries(entry.quotas)) {
+      // Unknown telemetry is not exhaustion. Antigravity can omit
+      // remainingFraction; the cache preserves that as fractionReported=false
+      // with remainingPercentage=0 only as a placeholder. Never turn that
+      // placeholder into a misleading "100% used" diagnostic.
+      if (quota.fractionReported === false) continue;
+
       const remaining = quota.remainingPercentage;
       if (typeof remaining !== "number" || !Number.isFinite(remaining)) continue;
       const used = Math.max(0, Math.min(100, 100 - remaining));
