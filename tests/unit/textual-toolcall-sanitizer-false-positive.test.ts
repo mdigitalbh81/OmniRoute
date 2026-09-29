@@ -31,6 +31,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { sanitizeOpenAIResponse } from "../../open-sse/handlers/responseSanitizer.ts";
+import {
+  parseTextualToolCallCandidate,
+  containsTextualToolCallMarker,
+} from "../../open-sse/utils/textualToolCall.ts";
 
 // ─── Bug 1: Non-streaming false positive ───────────────────────────────────
 
@@ -78,5 +82,46 @@ describe("Bug #1 — containsTextualToolCallContent false positives (#3355)", ()
     // Parsed into tool_calls, so content is nulled and tool_calls populated
     assert.strictEqual(msg?.content, null, "real tool call content should be nulled");
     assert.ok(Array.isArray(msg?.tool_calls) && msg.tool_calls.length > 0, "tool_calls populated");
+  });
+});
+
+
+describe("XML textual tool-call recovery", () => {
+  it("parses Codex-style <tool_call> JSON emitted as assistant text", () => {
+    const raw =
+      '<tool_call> {"name":"shell","arguments":{"command":"cd /tmp && pwd"}} </tool_call>';
+    const parsed = parseTextualToolCallCandidate(raw);
+    assert.deepEqual(parsed, {
+      kind: "complete",
+      name: "shell",
+      args: { command: "cd /tmp && pwd" },
+    });
+    assert.equal(containsTextualToolCallMarker(raw), true);
+  });
+
+  it("converts a non-streaming XML textual tool call into structured tool_calls", () => {
+    const raw =
+      '<tool_call> {"name":"shell","arguments":{"command":"docker compose up -d"}} </tool_call>';
+    const result = sanitizeOpenAIResponse(makeMsg(raw));
+    const choice = (
+      result.choices as {
+        finish_reason?: string;
+        message: { content: unknown; tool_calls?: Array<Record<string, unknown>> };
+      }[]
+    )[0];
+
+    assert.equal(choice?.finish_reason, "tool_calls");
+    assert.equal(choice?.message?.content, null);
+    assert.ok(Array.isArray(choice?.message?.tool_calls));
+    const call = choice?.message?.tool_calls?.[0] as {
+      function?: { name?: string; arguments?: string };
+    };
+    assert.equal(call?.function?.name, "shell");
+    assert.equal(call?.function?.arguments, '{"command":"docker compose up -d"}');
+  });
+
+  it("does not treat an incomplete XML tag as a completed tool call", () => {
+    const parsed = parseTextualToolCallCandidate('<tool_call> {"name":"shell"');
+    assert.deepEqual(parsed, { kind: "partial" });
   });
 });
