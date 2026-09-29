@@ -630,3 +630,44 @@ test("Antigravity BYOP 422 rotation persists cooldown via setConnectionRateLimit
   assert.equal(typeof cooldowns[0]?.untilMs, "number");
   assert.equal((cooldowns[0]?.untilMs ?? 0) > Date.now(), true);
 });
+
+
+test("persistent Antigravity 403 rotates to another eligible account", async () => {
+  const { runProviderExecutionPipeline } = await import(
+    "../../open-sse/handlers/chatCore/providerExecutionPipeline.ts"
+  );
+  let sendCount = 0;
+  let resolverCallCount = 0;
+  const input = makeInput({
+    policy: { allowAccountRotation: true, allowModelFallback: true },
+    provider: "antigravity",
+    connectionId: "agy-a",
+    send: async () => {
+      sendCount += 1;
+      if (sendCount === 1) {
+        return makeAttempt({ error: { message: "permission denied", type: "forbidden" } }, 403);
+      }
+      return makeAttempt(
+        {
+          id: "chatcmpl-ok",
+          choices: [{ message: { role: "assistant", content: "rotated" }, finish_reason: "stop" }],
+        },
+        200
+      );
+    },
+    getProviderCredentials: (async (_provider, _a, _b, _model, options) => {
+      resolverCallCount += 1;
+      assert.deepEqual(options?.excludeConnectionIds, ["agy-a"]);
+      return { connectionId: "agy-b", accessToken: "token-b", allRateLimited: false };
+    }) as PipelineConnectionContext["getProviderCredentials"],
+  });
+
+  const outcome = await runProviderExecutionPipeline(input);
+  assert.equal(resolverCallCount, 1);
+  assert.equal(sendCount, 2);
+  assert.equal(outcome.kind, "response");
+  if (outcome.kind === "response") {
+    assert.equal(outcome.connectionId, "agy-b");
+    assert.equal(outcome.response.status, 200);
+  }
+});
