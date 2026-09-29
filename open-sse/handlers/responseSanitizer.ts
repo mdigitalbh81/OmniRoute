@@ -13,6 +13,7 @@ import {
   applyCacheHitTokensToResponsesUsage,
 } from "./responseSanitizer/cacheHitTokens.ts";
 import { stripObfuscationZeroWidth } from "../utils/zeroWidth.ts";
+import { parseTextualToolCallCandidate } from "../utils/textualToolCall.ts";
 export {
   extractThinkingFromContent,
   shouldParseTextualReasoningTags,
@@ -211,44 +212,13 @@ function stripInternalToolEnvelopeText(content: string): string {
 function parseTextualToolCallContent(content: unknown): { name: string; args: unknown } | null {
   if (typeof content !== "string") return null;
   const normalized = stripInternalToolEnvelopeText(content);
-  const toolCallIndex = normalized.lastIndexOf("[Tool call:");
-  if (toolCallIndex < 0) return null;
-  const candidate = normalized.slice(toolCallIndex);
-  const headerMatch = candidate.match(/^\[Tool call:\s*([^\]\n]+)\]\s*\nArguments:\s*/);
-  if (!headerMatch) return null;
-  const name = headerMatch[1]?.trim();
-  const rawArgs = candidate.slice(headerMatch[0].length).trim();
-  if (!name || !rawArgs) return null;
-  const decoders = [
-    (value: string) => value,
-    (value: string) => {
-      if (value.startsWith('"') && value.endsWith('"')) {
-        const decoded = JSON.parse(value);
-        return typeof decoded === "string" ? decoded : value;
-      }
-      return value;
-    },
-  ];
-  for (const decode of decoders) {
-    try {
-      const decoded = decode(rawArgs);
-      return { name, args: stripZeroWidthValue(JSON.parse(decoded)) };
-    } catch {}
-  }
-  return null;
+  const candidate = parseTextualToolCallCandidate(normalized);
+  if (!candidate || candidate.kind !== "complete") return null;
+  return { name: candidate.name, args: candidate.args };
 }
 
-// Matches the exact header format required by parseTextualToolCallContent:
-// "[Tool call: name]\nArguments:" (with optional whitespace).  Using the full
-// header pattern prevents false positives when the model quotes "[Tool call:"
-// in prose, code examples, or terminal output (#3355).
-const TEXTUAL_TOOL_CALL_HEADER = /\[Tool call:[^\]\n]+\]\s*\nArguments:/;
-
 function containsTextualToolCallContent(content: unknown): boolean {
-  return (
-    typeof content === "string" &&
-    TEXTUAL_TOOL_CALL_HEADER.test(stripInternalToolEnvelopeText(content))
-  );
+  return parseTextualToolCallContent(content) !== null;
 }
 
 /**
