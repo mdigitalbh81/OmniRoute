@@ -24,7 +24,7 @@ import {
   removeHeaderCaseInsensitive,
 } from "../../services/antigravityClientProfile.ts";
 import * as prl from "../../utils/providerRequestLogging.ts";
-import { memoryTrace } from "../../utils/memoryTrace.ts";
+import { isMemoryTraceEnabled, memoryTrace } from "../../utils/memoryTrace.ts";
 import {
   createCreditsExtractionTransform as createCreditsExtractionTransformImpl,
   buildSsePassthroughResult,
@@ -200,21 +200,6 @@ export function buildAntigravity429ErrorMessage(errorJson: unknown): string {
   return errorMessage;
 }
 
-function getChunkedOrFixedBody(bodyStr: string, stream: boolean): BodyInit {
-  if (stream) {
-    return new ReadableStream(
-      {
-        async start(controller) {
-          controller.enqueue(new TextEncoder().encode(bodyStr));
-          controller.close();
-        },
-      },
-      { highWaterMark: 16384 }
-    );
-  }
-  return bodyStr;
-}
-
 function cloneAntigravityRequestBody(body: unknown): unknown {
   if (!body || typeof body !== "object") {
     return body;
@@ -379,17 +364,42 @@ export async function sendAntigravityRequest(
   });
   memoryTrace("antigravity.before-fetch", undefined, {
     bodyStringChars: serializedRequest.bodyString.length,
+    requestBodyMode: "fixed-string",
   });
-  let response = await fetchAntigravityWithReadinessTimeout(url, {
-    method: "POST",
-    headers: finalHeaders,
-    body: getChunkedOrFixedBody(serializedRequest.bodyString, stream),
-    ...(stream ? { duplex: "half" } : {}),
-    signal,
-  });
+
+  // The response may stream, but the request body itself is a finite JSON payload.
+  // Sending it as a ReadableStream makes proxyFetch/Undici treat it as
+  // non-replayable and adds an unnecessary duplex upload path. 9Router and the
+  // official-client-shaped path send this JSON as a normal fixed body.
+  // Keeping it replayable also avoids retaining a request-body stream across
+  // slow response-header waits on long Codex/Antigravity turns.
+  let waitTimer: ReturnType<typeof setInterval> | null = null;
+  if (isMemoryTraceEnabled()) {
+    waitTimer = setInterval(() => {
+      memoryTrace("antigravity.fetch.wait", undefined, {
+        bodyStringChars: serializedRequest.bodyString.length,
+        requestBodyMode: "fixed-string",
+      });
+    }, 2000);
+    waitTimer.unref?.();
+  }
+
+  let response: Response;
+  try {
+    response = await fetchAntigravityWithReadinessTimeout(url, {
+      method: "POST",
+      headers: finalHeaders,
+      body: serializedRequest.bodyString,
+      signal,
+    });
+  } finally {
+    if (waitTimer) clearInterval(waitTimer);
+  }
+
   memoryTrace("antigravity.after-fetch-headers", undefined, {
     status: response.status,
     bodyStringChars: serializedRequest.bodyString.length,
+    requestBodyMode: "fixed-string",
   });
 
   if (response.status === HTTP_STATUS.FORBIDDEN && finalHeaders["x-goog-user-project"]) {
@@ -400,8 +410,7 @@ export async function sendAntigravityRequest(
     response = await fetchAntigravityWithReadinessTimeout(url, {
       method: "POST",
       headers: retryHeaders,
-      body: getChunkedOrFixedBody(serializedRequest.bodyString, stream),
-      ...(stream ? { duplex: "half" } : {}),
+      body: serializedRequest.bodyString,
       signal,
     });
     finalHeaders = retryHeaders;
