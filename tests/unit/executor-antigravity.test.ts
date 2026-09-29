@@ -1035,14 +1035,13 @@ test("AntigravityExecutor.execute applies CLI fingerprint when enabled", async (
     assert.equal(headers["User-Agent"], antigravityIdeUserAgent("2.1.1"));
     assert.equal(headers["x-client-name"], undefined);
     assert.equal(headers["x-client-version"], undefined);
-    assert.equal(headers["x-goog-user-project"], "project-1");
+    assert.equal(headers["x-goog-user-project"], undefined);
     assert.deepEqual(Object.keys(parsedBody), [
       "project",
       "requestId",
       "request",
       "model",
       "userAgent",
-      "requestType",
       "enabledCreditTypes",
     ]);
     assert.deepEqual(parsedBody.enabledCreditTypes, ["GOOGLE_ONE_AI"]);
@@ -1119,7 +1118,7 @@ test("AntigravityExecutor.transformRequest maps Claude models through Gemini con
 
   assert.equal(result.project, "project-1");
   assert.equal(result.model, "claude-sonnet-4-6");
-  assert.equal(result.requestType, "agent");
+  assert.equal(result.requestType, undefined);
   assert.ok(result.request.sessionId);
   assert.equal(result.enabledCreditTypes, undefined);
   assert.deepEqual(result.request.contents, [{ role: "user", parts: [{ text: "Hello" }] }]);
