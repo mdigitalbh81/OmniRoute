@@ -158,7 +158,7 @@ type AntigravityRequestEnvelope = Record<string, unknown> & {
   project: string;
   model?: string;
   userAgent: "antigravity";
-  requestType: "agent" | "image_gen";
+  requestType?: "image_gen";
   requestId: string;
   request: Record<string, unknown>;
   enabledCreditTypes?: string[];
@@ -583,7 +583,6 @@ export class AntigravityExecutor extends BaseExecutor {
     const clientProfile = getAntigravityClientProfile(credentials);
     const raw = {
       ...getAntigravityContentHeaders(clientProfile, credentials.accessToken),
-      Accept: "text/event-stream",
     };
     // Scrub proxy/fingerprint headers that reveal non-native traffic
     return scrubProxyAndFingerprintHeaders(raw);
@@ -829,14 +828,14 @@ export class AntigravityExecutor extends BaseExecutor {
       ...passthroughFields
     } = normalizedBody;
 
-    const requestType = _requestType === "image_gen" ? "image_gen" : "agent";
+    const requestType = _requestType === "image_gen" ? "image_gen" : null;
     const envelope: AntigravityRequestEnvelope = {
       project: projectId,
       requestId: generateAntigravityRequestId(),
       request: transformedRequest,
       model: upstreamModel,
       userAgent: getAntigravityEnvelopeUserAgent(credentials),
-      requestType,
+      ...(requestType === "image_gen" ? { requestType } : {}),
       ...passthroughFields,
     };
 
