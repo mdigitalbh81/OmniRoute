@@ -54,6 +54,7 @@ jobs:
             tests/unit/provider-execution-pipeline.test.ts \
             tests/unit/antigravity-duplicate-tool-id-regression.test.ts \
             tests/unit/responses-web-search-choice-regression.test.ts \
+            tests/unit/textual-toolcall-sanitizer-false-positive.test.ts \
             tests/unit/native-codex-auto-resume.test.ts \
             tests/unit/native-codex-turn-pin-model-scoped-fallback.test.ts \
             tests/unit/chat-admission-abandoned-stream-lease.test.ts \
