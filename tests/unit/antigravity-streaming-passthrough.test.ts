@@ -174,6 +174,41 @@ test("createCreditsExtractionTransform with buffer cap truncates large buffers",
   assert.ok(true);
 });
 
+test("createCreditsExtractionTransform applies byte-based backpressure to slow consumers", async () => {
+  const transform = createCreditsExtractionTransform("test-account", 512);
+  const writer = transform.writable.getWriter();
+  const reader = transform.readable.getReader();
+  const chunk = new Uint8Array(4096);
+  let settledWrites = 0;
+
+  const writes = Array.from({ length: 64 }, () =>
+    writer.write(chunk).then(() => {
+      settledWrites += 1;
+    })
+  );
+
+  // Do not consume the readable side yet. With a 16 KB byte-based readable
+  // high-water mark, only a handful of 4 KB chunks may pass through before
+  // backpressure stops the transform. The previous count-based HWM=16384
+  // allowed all 64 chunks to queue, which could grow into multi-GB RSS.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(
+    settledWrites <= 8,
+    `expected byte-based backpressure before 8 writes, but ${settledWrites} writes settled`
+  );
+
+  const drain = (async () => {
+    while (true) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+  })();
+
+  await Promise.all(writes);
+  await writer.close();
+  await drain;
+});
+
 test("createCreditsExtractionTransform handles malformed SSE gracefully", async () => {
   const encoder = new TextEncoder();
   const badData = "not valid sse\ndata: {broken json\n\ndata: [DONE]\n\n";
