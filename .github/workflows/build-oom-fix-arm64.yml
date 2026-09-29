@@ -1,13 +1,13 @@
-name: Build OOM fix ARM64
+name: Build Antigravity backpressure OOM fix ARM64
 
 on:
   push:
     branches:
-      - "fix/oom-codex-abort-leak-20260927"
+      - "fix/antigravity-stream-backpressure-oom-20260929"
   workflow_dispatch:
 
 concurrency:
-  group: oom-fix-arm64-${{ github.ref }}
+  group: antigravity-backpressure-arm64-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -16,7 +16,7 @@ permissions:
 
 env:
   IMAGE: ghcr.io/mdigitalbh81/omniroute
-  TAG: 3.8.51-oom-codex-abort-fix-arm64
+  TAG: 3.8.51-oom-codex-antigravity-backpressure-arm64
 
 jobs:
   focused-tests:
@@ -38,11 +38,21 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund --legacy-peer-deps
 
-      - name: Run focused OOM / abort regression tests
+      - name: Run focused OOM / abort / backpressure regression tests
         env:
           DISABLE_SQLITE_AUTO_BACKUP: "true"
         run: |
-          node --max-old-space-size=8192             --import tsx/esm             --import ./open-sse/utils/setupPolyfill.ts             --import ./tests/_setup/isolateDataDir.ts             --test             --test-force-exit             --test-concurrency=1             tests/unit/chat-admission-abandoned-stream-lease.test.ts             tests/unit/chat-admission-pending-handler-abort-14456.test.ts             tests/unit/resource-pressure-gate-recovery.test.ts
+          node --max-old-space-size=8192 \
+            --import tsx/esm \
+            --import ./open-sse/utils/setupPolyfill.ts \
+            --import ./tests/_setup/isolateDataDir.ts \
+            --test \
+            --test-force-exit \
+            --test-concurrency=1 \
+            tests/unit/chat-admission-abandoned-stream-lease.test.ts \
+            tests/unit/chat-admission-pending-handler-abort-14456.test.ts \
+            tests/unit/resource-pressure-gate-recovery.test.ts \
+            tests/unit/antigravity-streaming-passthrough.test.ts
 
       - name: Core typecheck
         run: npm run typecheck:core
@@ -85,15 +95,15 @@ jobs:
           push: true
           tags: |
             ${{ env.IMAGE }}:${{ env.TAG }}
-            ${{ env.IMAGE }}:oomfix-${{ github.sha }}-arm64
+            ${{ env.IMAGE }}:backpressure-${{ github.sha }}-arm64
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           build-args: |
             OMNIROUTE_USE_TURBOPACK=0
             OMNIROUTE_BUILD_MEMORY_MB=12288
-          cache-from: type=gha,scope=oom-fix-arm64
-          cache-to: type=gha,scope=oom-fix-arm64,mode=max,ignore-error=true
+          cache-from: type=gha,scope=antigravity-backpressure-arm64
+          cache-to: type=gha,scope=antigravity-backpressure-arm64,mode=max,ignore-error=true
           provenance: true
 
       - name: Verify pushed platform and digest
@@ -107,7 +117,11 @@ jobs:
           set -euo pipefail
           docker pull "${IMAGE}:${TAG}"
           docker image inspect "${IMAGE}:${TAG}" --format 'Arch={{.Architecture}} OS={{.Os}}'
-          docker run -d --name omniroute-smoke             -p 20128:20128             -e INITIAL_PASSWORD=CI_SMOKE_ONLY             -e OMNIROUTE_MEMORY_MB=1024             "${IMAGE}:${TAG}"
+          docker run -d --name omniroute-smoke \
+            -p 20128:20128 \
+            -e INITIAL_PASSWORD=CI_SMOKE_ONLY \
+            -e OMNIROUTE_MEMORY_MB=1024 \
+            "${IMAGE}:${TAG}"
 
           ok=0
           for i in $(seq 1 30); do
