@@ -9,6 +9,9 @@ process.env.DATA_DIR = TEST_DATA_DIR;
 
 const coreDb = await import("../../src/lib/db/core.ts");
 const quotaCache = await import("../../src/domain/quotaCache.ts");
+const quotaSkipDiagnostics = await import(
+  "../../open-sse/services/combo/quotaSkipDiagnostics.ts"
+);
 
 test.after(() => {
   coreDb.resetDbInstance();
@@ -172,5 +175,41 @@ test("isQuotaExhaustedForRequest does not skip Claude extra-usage connections", 
   assert.equal(
     quotaCache.isQuotaExhaustedForRequest(connectionId, "codex", null, { blockExtraUsage: false }),
     true
+  );
+});
+
+
+test("quota skip diagnostics ignore Antigravity windows whose fraction is unknown", () => {
+  const connectionId = "conn-antigravity-unknown";
+  quotaCache.setQuotaCache(connectionId, "antigravity", {
+    "claude-opus-4-6-thinking": {
+      remainingPercentage: 0,
+      resetAt: null,
+      fractionReported: false,
+    },
+    "gpt-oss-120b-medium": {
+      remainingPercentage: 0,
+      resetAt: null,
+      fractionReported: false,
+    },
+    "claude-sonnet-4-6": {
+      remainingPercentage: 0,
+      resetAt: null,
+      fractionReported: false,
+    },
+  });
+
+  const exclusions = quotaSkipDiagnostics.collectQuotaWindowExclusions([
+    {
+      provider: "antigravity",
+      modelStr: "antigravity/claude-opus-4-6-thinking",
+      connectionId,
+    },
+  ]);
+
+  assert.deepEqual(
+    exclusions,
+    [],
+    "unknown remainingFraction must not be rendered as 100% quota usage"
   );
 });
