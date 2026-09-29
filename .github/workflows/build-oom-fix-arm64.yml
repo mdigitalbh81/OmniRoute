@@ -1,13 +1,13 @@
-name: Build OOM fix ARM64
+name: Build native-stable Codex OOM + auto-resume ARM64
 
 on:
   push:
     branches:
-      - "fix/oom-codex-abort-leak-20260927"
+      - "deploy/native-stable-oom-autoresume-20260929"
   workflow_dispatch:
 
 concurrency:
-  group: oom-fix-arm64-${{ github.ref }}
+  group: native-stable-oomfix-arm64-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -16,7 +16,7 @@ permissions:
 
 env:
   IMAGE: ghcr.io/mdigitalbh81/omniroute
-  TAG: 3.8.51-oom-codex-abort-fix-arm64
+  TAG: 3.8.51-native-codex-oomfix-arm64
 
 jobs:
   focused-tests:
@@ -38,11 +38,22 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund --legacy-peer-deps
 
-      - name: Run focused OOM / abort regression tests
+      - name: Run focused native / OOM / backpressure regression tests
         env:
           DISABLE_SQLITE_AUTO_BACKUP: "true"
         run: |
-          node --max-old-space-size=8192             --import tsx/esm             --import ./open-sse/utils/setupPolyfill.ts             --import ./tests/_setup/isolateDataDir.ts             --test             --test-force-exit             --test-concurrency=1             tests/unit/chat-admission-abandoned-stream-lease.test.ts             tests/unit/chat-admission-pending-handler-abort-14456.test.ts             tests/unit/resource-pressure-gate-recovery.test.ts
+          node --max-old-space-size=8192 \
+            --import tsx/esm \
+            --import ./open-sse/utils/setupPolyfill.ts \
+            --import ./tests/_setup/isolateDataDir.ts \
+            --test \
+            --test-force-exit \
+            --test-concurrency=1 \
+            tests/unit/chat-admission-abandoned-stream-lease.test.ts \
+            tests/unit/chat-admission-pending-handler-abort-14456.test.ts \
+            tests/unit/resource-pressure-gate-recovery.test.ts \
+            tests/unit/antigravity-streaming-passthrough.test.ts \
+            tests/unit/native-codex-auto-resume.test.ts
 
       - name: Core typecheck
         run: npm run typecheck:core
@@ -85,14 +96,14 @@ jobs:
           push: true
           tags: |
             ${{ env.IMAGE }}:${{ env.TAG }}
-            ${{ env.IMAGE }}:oomfix-${{ github.sha }}-arm64
+            ${{ env.IMAGE }}:native-codex-oomfix-${{ github.sha }}-arm64
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           build-args: |
             OMNIROUTE_USE_TURBOPACK=0
             OMNIROUTE_BUILD_MEMORY_MB=12288
-          cache-from: type=gha,scope=oom-fix-arm64
+          cache-from: type=gha,scope=native-stable-oomfix-arm64
           cache-to: type=gha,scope=oom-fix-arm64,mode=max,ignore-error=true
           provenance: true
 
