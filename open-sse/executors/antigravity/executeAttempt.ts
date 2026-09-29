@@ -377,12 +377,19 @@ export async function sendAntigravityRequest(
   memoryTrace("antigravity.after-provider-capture", transformedBody, {
     bodyStringChars: serializedRequest.bodyString.length,
   });
+  memoryTrace("antigravity.before-fetch", undefined, {
+    bodyStringChars: serializedRequest.bodyString.length,
+  });
   let response = await fetchAntigravityWithReadinessTimeout(url, {
     method: "POST",
     headers: finalHeaders,
     body: getChunkedOrFixedBody(serializedRequest.bodyString, stream),
     ...(stream ? { duplex: "half" } : {}),
     signal,
+  });
+  memoryTrace("antigravity.after-fetch-headers", undefined, {
+    status: response.status,
+    bodyStringChars: serializedRequest.bodyString.length,
   });
 
   if (response.status === HTTP_STATUS.FORBIDDEN && finalHeaders["x-goog-user-project"]) {
