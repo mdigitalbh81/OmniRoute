@@ -8,6 +8,7 @@ import { caseInsensitiveToolNameLookup } from "../helpers/toolCallHelper.ts";
 import {
   parseTextualToolCallCandidate,
   containsTextualToolCallMarker,
+  findTextualToolCallStart,
 } from "../../utils/textualToolCall.ts";
 import {
   normalizeOpenAICompatibleFinishReasonString,
@@ -28,6 +29,7 @@ type GeminiToOpenAIState = {
   toolCalls: Map<number, unknown>;
   toolNameMap?: Map<string, string>;
   textualToolCallBuffer?: string;
+  textualToolCallCompleted?: boolean;
   textualReasoningTagBuffer?: string;
   activeTextualReasoningTag?: string;
   textualReasoningContentBuffer?: string;
@@ -479,16 +481,19 @@ export function geminiToOpenAIResponse(chunk, state) {
           : partText;
         if (!afterReasoning) continue;
 
+        // Once an emulated textual tool call has been converted into a real
+        // structured call, ignore any model-authored fake <tool_result>/follow-up
+        // transcript that arrives later in the same generation. The client must
+        // execute the real tool and provide the real result on the next turn.
+        if (state.textualToolCallCompleted) continue;
+
         let accumulated = (state.textualToolCallBuffer || "") + afterReasoning;
 
         let candidate = parseTextualToolCallCandidate(accumulated);
 
         if (candidate) {
           accumulated = stripObfuscationZeroWidth(accumulated);
-          let toolCallIndex = accumulated.lastIndexOf("(empty)[Tool call:");
-          if (toolCallIndex < 0) {
-            toolCallIndex = accumulated.lastIndexOf("[Tool call:");
-          }
+          let toolCallIndex = findTextualToolCallStart(accumulated);
           if (toolCallIndex < 0) {
             const lastParen = accumulated.lastIndexOf("(");
             if (lastParen !== -1 && "(empty)[Tool call:".startsWith(accumulated.slice(lastParen))) {
@@ -497,6 +502,14 @@ export function geminiToOpenAIResponse(chunk, state) {
               const lastBracket = accumulated.lastIndexOf("[");
               if (lastBracket !== -1 && "[Tool call:".startsWith(accumulated.slice(lastBracket))) {
                 toolCallIndex = lastBracket;
+              } else {
+                const lastAngle = accumulated.lastIndexOf("<");
+                if (
+                  lastAngle !== -1 &&
+                  "<tool_call>".startsWith(accumulated.slice(lastAngle).toLowerCase())
+                ) {
+                  toolCallIndex = lastAngle;
+                }
               }
             }
           }
@@ -535,6 +548,7 @@ export function geminiToOpenAIResponse(chunk, state) {
                 results
               );
               state.textualToolCallBuffer = "";
+              state.textualToolCallCompleted = true;
             } else {
               state.textualToolCallBuffer = accumulated;
             }
@@ -713,6 +727,7 @@ export function geminiToOpenAIResponse(chunk, state) {
           state,
           results
         );
+        state.textualToolCallCompleted = true;
       } else if (state.hasEmittedContent || !containsTextualToolCallMarker(remainingText)) {
         state.hasEmittedContent = true;
         results.push({
