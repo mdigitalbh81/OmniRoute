@@ -16,6 +16,7 @@ import {
 import { SSE_HEARTBEAT_INTERVAL_MS } from "@omniroute/open-sse/config/constants";
 import { resolveStreamFlag } from "@omniroute/open-sse/utils/aiSdkCompat";
 import { errorResponse } from "@omniroute/open-sse/utils/error";
+import { memoryTrace } from "@omniroute/open-sse/utils/memoryTrace";
 import {
   getDeadlineController,
   withDeadlineSignal,
@@ -120,6 +121,7 @@ async function postHandler(request: any) {
     let parsedBody;
     try {
       parsedBody = await request.json();
+      memoryTrace("responses.route.after-json", parsedBody);
     } catch {
       return finishAdmission(errorResponse(400, "Invalid JSON body"));
     }
@@ -128,6 +130,7 @@ async function postHandler(request: any) {
       return finishAdmission(errorResponse(400, "Request body must be a JSON object"));
     }
     parsedBody = parsed.data;
+    memoryTrace("responses.route.after-parse", parsedBody);
 
     const structuralAdmission = await admitChatStructure(parsedBody, admission.lease, {
       sessionId,
@@ -186,6 +189,7 @@ async function postHandler(request: any) {
       request,
       parsedBody
     );
+    memoryTrace("responses.route.after-model-resolution", resolvedBody);
     const accept = String(request.headers?.get?.("accept") || "");
     const wantsStreaming = resolveStreamFlag(resolvedBody?.stream, accept, "openai-responses");
     if (wantsStreaming) {
