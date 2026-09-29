@@ -81,11 +81,13 @@ export function applyAntigravityClientProfileHeaders(
     removeHeaderCaseInsensitive(headers, name);
   }
 
-  const project = getProjectHeaderValue(body);
+  // Match the official Antigravity IDE content request shape (and 9Router's
+  // live-tested implementation): the project belongs in the JSON envelope,
+  // not in x-goog-user-project. Some Cloud Code accounts return 403 when that
+  // header is present even though the same token/project succeeds without it.
+  // Always scrub any inherited copy so content requests stay header-compatible.
+  void body;
   removeHeaderCaseInsensitive(headers, "x-goog-user-project");
-  if (project) {
-    headers["x-goog-user-project"] = project;
-  }
 
   return profile;
 }
