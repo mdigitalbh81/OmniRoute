@@ -1128,3 +1128,44 @@ test("AntigravityExecutor.transformRequest maps Claude models through Gemini con
   assert.equal(result.request.temperature, undefined);
   assert.equal(result.request.toolConfig, undefined);
 });
+
+
+test("Antigravity streaming responses use a replayable fixed JSON request body", async () => {
+  const executor = new AntigravityExecutor();
+  const originalFetch = globalThis.fetch;
+  let capturedBody: unknown = null;
+  let capturedDuplex: unknown = null;
+
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    capturedBody = init?.body;
+    capturedDuplex = (init as RequestInit & { duplex?: unknown } | undefined)?.duplex;
+    return new Response(
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}}\n\n',
+      { status: 200, headers: { "Content-Type": "text/event-stream" } }
+    );
+  }) as typeof fetch;
+
+  try {
+    const result = await executor.execute({
+      model: "antigravity/gemini-3.1-pro",
+      body: {
+        request: {
+          contents: [{ role: "user", parts: [{ text: "hello" }] }],
+        },
+      },
+      stream: true,
+      credentials: {
+        accessToken: "token",
+        projectId: "project-1",
+      },
+      log: { debug() {}, warn() {}, info() {}, error() {} },
+    });
+
+    assert.equal(result.response.status, 200);
+    assert.equal(typeof capturedBody, "string");
+    assert.equal(capturedDuplex, undefined);
+    assert.match(String(capturedBody), /"project":"project-1"/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
