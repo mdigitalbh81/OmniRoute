@@ -85,7 +85,7 @@ test("AntigravityExecutor.buildHeaders includes native headers without OmniRoute
   const headers = executor.buildHeaders({ accessToken: "ag-token" }, false);
 
   assert.equal(headers.Authorization, "Bearer ag-token");
-  assert.equal(headers.Accept, "text/event-stream");
+  assert.equal(headers.Accept, undefined);
   assert.equal(headers["User-Agent"], antigravityIdeUserAgent("2.1.1"));
   assert.equal(headers["X-OmniRoute-Source"], undefined);
 });
@@ -140,9 +140,9 @@ test("AntigravityExecutor.transformRequest normalizes model, project and content
     "request",
     "model",
     "userAgent",
-    "requestType",
   ]);
   assert.equal(result.userAgent, "antigravity");
+  assert.equal(result.requestType, undefined);
   assert.match(result.requestId, /^agent\/\d+\/[0-9a-f]{8}$/);
   assert.equal(result.enabledCreditTypes, undefined);
   assert.ok(result.request.sessionId);
