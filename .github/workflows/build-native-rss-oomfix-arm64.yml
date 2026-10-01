@@ -55,6 +55,7 @@ jobs:
             tests/unit/resource-pressure.test.ts \
             tests/unit/resource-pressure-runtime.test.ts \
             tests/unit/antigravity-streaming-passthrough.test.ts \
+            tests/unit/executor-base-utils.test.ts \
             tests/unit/native-codex-auto-resume.test.ts
 
       - name: Core typecheck
