@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 
 const base = await import("../../open-sse/executors/base.ts");
 
@@ -114,6 +115,18 @@ test("mergeAbortSignals aborts when secondary fires", () => {
   assert.ok(!merged.aborted);
   c2.abort(new Error("secondary"));
   assert.ok(merged.aborted);
+});
+
+test("mergeAbortSignals does not install persistent JS listeners on modern Node", () => {
+  const c1 = new AbortController();
+  const c2 = new AbortController();
+  const merged = base.mergeAbortSignals(c1.signal, c2.signal);
+
+  assert.equal(getEventListeners(c1.signal, "abort").length, 0);
+  assert.equal(getEventListeners(c2.signal, "abort").length, 0);
+
+  c1.abort(new Error("done"));
+  assert.equal(merged.aborted, true);
 });
 
 test("sanitizeReasoningEffortForProvider passes through body without reasoning_effort", () => {
