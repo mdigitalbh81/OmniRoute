@@ -3,6 +3,7 @@
 // separate from executor-antigravity.test.ts to respect its frozen file-size cap.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 
 import {
   AntigravityExecutor,
@@ -13,6 +14,10 @@ import {
   seedAntigravityIdeVersionCache,
   seedAntigravityCliVersionCache,
 } from "../../open-sse/services/antigravityVersion.ts";
+import {
+  bindAbortLifecycle,
+  buildSsePassthroughResult,
+} from "../../open-sse/executors/antigravity/streamingPassthrough.ts";
 
 type ChatCompletionPayload = {
   object?: string;
@@ -198,4 +203,90 @@ test("createCreditsExtractionTransform handles malformed SSE gracefully", async 
   // Data passes through unmodified, no crash on malformed input
   const collected = new TextDecoder().decode(Buffer.concat(chunks));
   assert.ok(collected.includes("not valid sse"));
+});
+
+
+test("bindAbortLifecycle removes abort listener after normal EOF", async () => {
+  const abort = new AbortController();
+  const encoder = new TextEncoder();
+  const source = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode("data: ok\n\n"));
+      controller.close();
+    },
+  });
+
+  const wrapped = bindAbortLifecycle(source, abort.signal);
+  assert.equal(getEventListeners(abort.signal, "abort").length, 1);
+
+  const reader = wrapped.getReader();
+  while (!(await reader.read()).done) {
+    // drain
+  }
+
+  assert.equal(
+    getEventListeners(abort.signal, "abort").length,
+    0,
+    "completed streams must not retain their abort listener/body"
+  );
+});
+
+test("buildSsePassthroughResult releases abort binding after a completed turn", async () => {
+  const abort = new AbortController();
+  const encoder = new TextEncoder();
+  const source = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(
+        encoder.encode(
+          'data: {"remainingCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"7"}]}\n\n'
+        )
+      );
+      controller.close();
+    },
+  });
+
+  const result = buildSsePassthroughResult(
+    source,
+    { status: 200, statusText: "OK", headers: new Headers({ "content-type": "text/event-stream" }) },
+    "acct",
+    () => {},
+    "https://example.test",
+    {},
+    {},
+    abort.signal
+  );
+
+  assert.equal(getEventListeners(abort.signal, "abort").length, 1);
+  await result.response.arrayBuffer();
+  assert.equal(
+    getEventListeners(abort.signal, "abort").length,
+    0,
+    "passthrough completion must detach the request abort listener"
+  );
+});
+
+test("bindAbortLifecycle propagates client abort and detaches immediately", async () => {
+  const abort = new AbortController();
+  let cancelled = false;
+  const source = new ReadableStream<Uint8Array>({
+    pull() {
+      // keep pending until aborted
+      return new Promise(() => {});
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+
+  const wrapped = bindAbortLifecycle(source, abort.signal);
+  const reader = wrapped.getReader();
+  const pendingRead = reader.read().catch(() => ({ done: true as const, value: undefined }));
+
+  abort.abort(new Error("client disconnected"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(getEventListeners(abort.signal, "abort").length, 0);
+  assert.equal(cancelled, true);
+  await reader.cancel().catch(() => {});
+  void pendingRead;
 });
