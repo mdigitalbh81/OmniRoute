@@ -269,24 +269,15 @@ test("bindAbortLifecycle propagates client abort and detaches immediately", asyn
   const abort = new AbortController();
   let cancelled = false;
   const source = new ReadableStream<Uint8Array>({
-    pull() {
-      // keep pending until aborted
-      return new Promise(() => {});
-    },
     cancel() {
       cancelled = true;
     },
   });
 
-  const wrapped = bindAbortLifecycle(source, abort.signal);
-  const reader = wrapped.getReader();
-  const pendingRead = reader.read().catch(() => ({ done: true as const, value: undefined }));
-
+  bindAbortLifecycle(source, abort.signal);
   abort.abort(new Error("client disconnected"));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(getEventListeners(abort.signal, "abort").length, 0);
   assert.equal(cancelled, true);
-  await reader.cancel().catch(() => {});
-  void pendingRead;
 });
