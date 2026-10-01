@@ -1,0 +1,1 @@
+Fix Native Codex long-session RSS growth on Antigravity by releasing request abort listeners when SSE streams complete, and add an absolute RSS admission fuse derived from OMNIROUTE_MEMORY_MB (override: OMNIROUTE_RSS_PRESSURE_MB). This branch is based directly on 5b1e3401ce446f9542482e59f4f139ad0909949d.
