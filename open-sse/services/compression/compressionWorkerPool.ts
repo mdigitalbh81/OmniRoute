@@ -99,15 +99,26 @@ export class CompressionWorkerPool {
   private readonly size: number;
   private readonly timeoutMs: number;
   private readonly idleMs: number;
+  private readonly maxOldGenerationSizeMb: number;
 
   constructor({
     size = positiveInteger(process.env.OMNI_COMPRESSION_WORKERS, 2),
     timeoutMs = positiveInteger(process.env.OMNI_COMPRESSION_WORKER_TIMEOUT_MS, 120_000),
     idleMs = positiveInteger(process.env.OMNI_COMPRESSION_WORKER_IDLE_MS, 60_000),
-  }: { size?: number; timeoutMs?: number; idleMs?: number } = {}) {
+    maxOldGenerationSizeMb = positiveInteger(
+      process.env.OMNI_COMPRESSION_WORKER_MAX_OLD_MB,
+      1024
+    ),
+  }: {
+    size?: number;
+    timeoutMs?: number;
+    idleMs?: number;
+    maxOldGenerationSizeMb?: number;
+  } = {}) {
     this.size = Math.max(1, Math.floor(size));
     this.timeoutMs = Math.max(1, Math.floor(timeoutMs));
     this.idleMs = Math.max(1, Math.floor(idleMs));
+    this.maxOldGenerationSizeMb = Math.max(128, Math.floor(maxOldGenerationSizeMb));
   }
 
   run(
@@ -135,7 +146,15 @@ export class CompressionWorkerPool {
   }
   private spawn(): PoolWorker {
     const slot: PoolWorker = {
-      worker: new Worker(resolveWorkerFile()),
+      worker: new Worker(resolveWorkerFile(), {
+        // Compression of very large Native Codex histories is intentionally
+        // isolated from the gateway heap. If a pathological heuristic/regex job
+        // exceeds this private V8 budget the worker exits and the pool fail-opens
+        // to the original body instead of letting the host reach global OOM.
+        resourceLimits: {
+          maxOldGenerationSizeMb: this.maxOldGenerationSizeMb,
+        },
+      }),
       job: null,
       timeout: null,
       idle: null,
