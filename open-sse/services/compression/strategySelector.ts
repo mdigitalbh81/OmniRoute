@@ -540,7 +540,23 @@ async function runCompressionAsync(
   if (isCompressionWorkerEligible(body, mode, workerOptions)) {
     try {
       const { runCompressionInWorker } = await import("./compressionWorkerPool.ts");
-      return await runCompressionInWorker(body, mode, workerOptions, options?.onEngineStep);
+      const result = await runCompressionInWorker(
+        body,
+        mode,
+        workerOptions,
+        options?.onEngineStep
+      );
+      if (mode === "ultra" && result.stats) {
+        return {
+          ...result,
+          stats: {
+            ...result.stats,
+            techniquesUsed: ["ultra-heuristic-pruning"],
+            ultraTier: "heuristic",
+          },
+        };
+      }
+      return result;
     } catch {
       return { body, compressed: false, stats: null };
     }
