@@ -51,6 +51,7 @@ jobs:
             --test-concurrency=1 \
             tests/unit/chat-admission-abandoned-stream-lease.test.ts \
             tests/unit/chat-admission-pending-handler-abort-14456.test.ts \
+            tests/unit/compression/compression-worker.test.ts \
             tests/unit/resource-pressure-gate-recovery.test.ts \
             tests/unit/resource-pressure.test.ts \
             tests/unit/resource-pressure-runtime.test.ts \
