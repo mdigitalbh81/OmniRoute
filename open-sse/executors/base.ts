@@ -228,13 +228,33 @@ export type CountTokensInput = {
 };
 
 export function mergeAbortSignals(primary: AbortSignal, secondary: AbortSignal): AbortSignal {
-  const controller = new AbortController();
-
-  const abortFrom = (source: AbortSignal) => {
-    if (!controller.signal.aborted) {
-      controller.abort(source.reason);
+  // Node 20.3+ implements AbortSignal.any() with composite-signal bookkeeping
+  // instead of ordinary JS event listeners on each source signal. That matters
+  // for long-lived streaming requests: the old helper installed two once:true
+  // listeners that stayed attached forever when neither timeout nor client abort
+  // fired, allowing completed request/fetch contexts to accumulate across turns.
+  const abortSignalAny = (
+    AbortSignal as typeof AbortSignal & {
+      any?: (signals: AbortSignal[]) => AbortSignal;
     }
+  ).any;
+  if (typeof abortSignalAny === "function") {
+    return abortSignalAny.call(AbortSignal, [primary, secondary]);
+  }
+
+  // Compatibility fallback for runtimes without AbortSignal.any(). At least
+  // detach both source listeners as soon as either side aborts.
+  const controller = new AbortController();
+  const cleanup = (): void => {
+    primary.removeEventListener("abort", onPrimaryAbort);
+    secondary.removeEventListener("abort", onSecondaryAbort);
   };
+  const abortFrom = (source: AbortSignal): void => {
+    cleanup();
+    if (!controller.signal.aborted) controller.abort(source.reason);
+  };
+  const onPrimaryAbort = (): void => abortFrom(primary);
+  const onSecondaryAbort = (): void => abortFrom(secondary);
 
   if (primary.aborted) {
     abortFrom(primary);
@@ -245,8 +265,8 @@ export function mergeAbortSignals(primary: AbortSignal, secondary: AbortSignal):
     return controller.signal;
   }
 
-  primary.addEventListener("abort", () => abortFrom(primary), { once: true });
-  secondary.addEventListener("abort", () => abortFrom(secondary), { once: true });
+  primary.addEventListener("abort", onPrimaryAbort, { once: true });
+  secondary.addEventListener("abort", onSecondaryAbort, { once: true });
   return controller.signal;
 }
 
