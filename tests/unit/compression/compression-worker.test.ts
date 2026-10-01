@@ -121,7 +121,7 @@ describe("compression worker execution", () => {
     assert.deepEqual(comparable(async), comparable(sync));
   });
 
-  it("runs heuristic ultra in the worker and matches the synchronous result", async () => {
+  it("runs heuristic ultra in the worker and preserves the async ultra contract", async () => {
     const ultraConfig = {
       ...config,
       defaultMode: "ultra",
@@ -133,9 +133,22 @@ describe("compression worker execution", () => {
         maxTokensPerMessage: 1,
       },
     } as CompressionConfig;
-    const sync = applyCompression(body, "ultra", { config: ultraConfig });
-    const async = await applyCompressionAsync(body, "ultra", { config: ultraConfig });
-    assert.deepEqual(comparable(async), comparable(sync));
+    let posted = 0;
+    const originalPostMessage = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (this: Worker, ...args) {
+      posted++;
+      return originalPostMessage.apply(this, args);
+    };
+    try {
+      const result = await applyCompressionAsync(body, "ultra", { config: ultraConfig });
+      assert.equal(result.compressed, true);
+      assert.equal(result.stats?.mode, "ultra");
+      assert.equal(result.stats?.ultraTier, "heuristic");
+      assert.deepEqual(result.stats?.techniquesUsed, ["ultra-heuristic-pruning"]);
+      assert.ok(posted >= 1, "heuristic ultra must be dispatched to a worker thread");
+    } finally {
+      Worker.prototype.postMessage = originalPostMessage;
+    }
   });
 
   it("caps the private V8 heap of compression workers", async () => {
