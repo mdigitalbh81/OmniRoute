@@ -83,3 +83,50 @@ test("multiple tool_search_call items interspersed with messages are skipped in 
     ["user", "assistant"]
   );
 });
+
+
+test("tool_search_output can be replayed without breaking a Chat downgrade", () => {
+  const body = {
+    model: "test-model",
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "find tools" }] },
+      { type: "tool_search_call", call_id: "call_search_1", arguments: '{"query":"calendar"}' },
+      {
+        type: "tool_search_output",
+        call_id: "call_search_1",
+        status: "completed",
+        tools: [{ type: "function", name: "calendar_lookup", parameters: { type: "object", properties: {} } }],
+      },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] },
+    ],
+    stream: false,
+  };
+  const result = translateRequest("openai-responses", "openai", "test-model", body, false) as {
+    messages: Array<{ role: string; content: unknown; tool_calls?: unknown }>;
+  };
+  assert.deepEqual(result.messages.map((message) => message.role), ["user", "assistant"]);
+  assert.ok(!result.messages.some((message) => message.tool_calls), "metadata must not synthesize tool calls");
+});
+
+test("tool_search_output does not interfere with explicitly loaded additional_tools", () => {
+  const body = {
+    model: "test-model",
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "look it up" }] },
+      { type: "tool_search_output", call_id: "search_2", tools: [{ type: "function", name: "search_one" }] },
+      {
+        type: "additional_tools",
+        tools: [
+          { type: "function", name: "search_one", description: "Available deferred tool", parameters: { type: "object", properties: {} } },
+        ],
+      },
+    ],
+    stream: false,
+  };
+  const result = translateRequest("openai-responses", "openai", "test-model", body, false) as {
+    messages: Array<{ role: string }>;
+    tools: Array<{ type: string; function?: { name: string } }>;
+  };
+  assert.deepEqual(result.messages.map((message) => message.role), ["user"]);
+  assert.deepEqual(result.tools.map((tool) => tool.function?.name), ["search_one"]);
+});
