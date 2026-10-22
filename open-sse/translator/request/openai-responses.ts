@@ -475,7 +475,15 @@ export function openaiResponsesToOpenAIRequest(
     // conversation where Codex previously used tool_search (the whole session
     // would carry tool_search_call items forward in `input`). Skipping matches
     // the reasoning-item policy: display-only metadata, no chat side-effect.
-    if (itemType === "tool_search_call" || itemType === "tool_search_result") {
+    // Client-executed tool discovery outputs are Responses-only history metadata.
+    // Chat has no representation for this metadata; current tool declarations
+    // are collected from tools/additional_tools before converting messages.
+    // Do not turn these into orphan Chat tool result messages.
+    if (
+      itemType === "tool_search_call" ||
+      itemType === "tool_search_result" ||
+      itemType === "tool_search_output"
+    ) {
       continue;
     }
 
