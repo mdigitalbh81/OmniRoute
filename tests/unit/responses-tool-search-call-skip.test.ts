@@ -83,3 +83,48 @@ test("multiple tool_search_call items interspersed with messages are skipped in 
     ["user", "assistant"]
   );
 });
+
+
+test("tool_search_output in follow-up history is ignored without HTTP 400", () => {
+  const body = {
+    model: "test-model",
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "find calendar tool" }] },
+      { type: "tool_search_call", call_id: "search_1", arguments: '{"query":"calendar"}' },
+      {
+        type: "tool_search_output",
+        call_id: "search_1",
+        status: "completed",
+        tools: [{ type: "function", name: "calendar_lookup", parameters: { type: "object", properties: {} } }],
+      },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "found it" }] },
+    ],
+    stream: false,
+  };
+  const result = translateRequest("openai-responses", "openai", "test-model", body, false) as {
+    messages: Array<{ role: string; tool_calls?: unknown }>;
+  };
+  assert.deepEqual(result.messages.map((message) => message.role), ["user", "assistant"]);
+  assert.ok(!result.messages.some((message) => message.tool_calls), "discovery output is not a Chat tool call");
+});
+
+test("tool_search_output does not discard separately declared additional_tools", () => {
+  const body = {
+    model: "test-model",
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "use calendar" }] },
+      { type: "tool_search_output", call_id: "search_2", tools: [{ type: "function", name: "calendar_lookup" }] },
+      {
+        type: "additional_tools",
+        tools: [{ type: "function", name: "calendar_lookup", parameters: { type: "object", properties: {} } }],
+      },
+    ],
+    stream: false,
+  };
+  const result = translateRequest("openai-responses", "openai", "test-model", body, false) as {
+    messages: Array<{ role: string }>;
+    tools: Array<{ function?: { name: string } }>;
+  };
+  assert.deepEqual(result.messages.map((message) => message.role), ["user"]);
+  assert.deepEqual(result.tools.map((tool) => tool.function?.name), ["calendar_lookup"]);
+});
